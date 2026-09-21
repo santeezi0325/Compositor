@@ -88,10 +88,14 @@ nonisolated enum AssistantPlanError: LocalizedError, Equatable {
     case tooManySteps(Int)
     case notForMask(String)
     case onlyForMask
+    case needsSelection(String)
     case emptyStep
 
     var errorDescription: String? {
         switch self {
+        case .needsSelection(let name):
+            "\(name) works over a selection, and nothing is selected. Select the part you want "
+                + "it to work on first."
         case .tooManySteps(let count):
             "The assistant came back with \(count) steps for one instruction, which is more than "
                 + "it is allowed to apply at once. Try asking for one change at a time."

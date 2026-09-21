@@ -116,6 +116,13 @@ nonisolated struct ModelPlan {
     var note: String
     @Guide(description: "The edits to apply in order. At most three. Empty if you cannot do what was asked.")
     var steps: [ModelStep]
+
+    /// Spelled out rather than left to the memberwise initializer, which a macro that adds its
+    /// own initializer would suppress. The tests build these directly.
+    init(note: String, steps: [ModelStep]) {
+        self.note = note
+        self.steps = steps
+    }
 }
 
 @Generable
@@ -125,6 +132,12 @@ nonisolated struct ModelStep {
     var amount: Double
     @Guide(description: "The number the user named themselves — pixels, stops or degrees — or 0 if they named none.")
     var exact: Double
+
+    init(operation: ModelOperation, amount: Double, exact: Double = 0) {
+        self.operation = operation
+        self.amount = amount
+        self.exact = exact
+    }
 }
 
 @Generable
