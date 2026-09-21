@@ -19,11 +19,12 @@ a typed plan rather than prose to be parsed. This branch uses it.
 public on-device image-editing model for a third-party Mac app, in any framework. The only
 headless generative image API Apple ever shipped is being removed at macOS 27, and its
 replacement is a modal sheet backed by a server model. Anything generative has to come from a
-third-party model we ship and run ourselves, and that is a separate, much larger piece of work.
+third-party model, and the model worth having needs more memory than most Macs will give it.
 
 So: ship the understanding half now over the app's own full-resolution operations, which is
 most of the value and all of the reliability, and treat the generative half as a second
-project behind the same protocol.
+project behind the same protocol — starting with a decision about whose hardware it runs on,
+because that one is not a detail.
 
 ## What Apple gives us
 
@@ -185,15 +186,89 @@ Worth knowing before anyone plans around it, and true no matter what model goes 
 
 ## If you want generative editing
 
-It has to be a model we ship and run ourselves. That is a real project, not a wiring job, and
-the honest scoping questions are: what runs in Swift rather than only in Python, what it costs
-in memory next to a photo document, whether it can be cancelled mid-generation, and how
-multi-gigabyte weights reach a user's Mac. Those are being checked separately.
+It has to be a model we ship and run ourselves. It is buildable on a Mac today by one engineer,
+but not where you would look first.
 
-The shape it would take here is a second planner operation — one that says "hand the whole
-layer to the generative backend with this prompt" — plus a `GenerativeBackend` behind it. The
+**MLX Swift is not the answer, which was a surprise.** `mlx-swift-examples` ships exactly two
+libraries, MLXMNIST and StableDiffusion, and the StableDiffusion one has had no substantive
+commit since June 2025. The only model in it that does image-to-image is SDXL-Turbo, whose
+weights are non-commercial. And SDXL img2img is **not instruction editing** anyway: it
+VAE-encodes the image, renoises it, and denoises against a prompt describing the *target
+picture*. "Make the sky stormier" is read as a caption, not as a command — which is exactly the
+distinction that matters for an assistant. There is no FLUX.1 Kontext, Qwen-Image-Edit,
+Step1X-Edit or OmniGen in `mlx-swift-examples`, and none in ml-explore's *Python* `mlx-examples`
+either. Swift ports of the real edit models exist, but they are one-author projects — the
+hub for several of them has one star and a README saying it is not ready for use.
+
+**The runtime that actually does this today is C++.** `stable-diffusion.cpp` is MIT, has a Metal
+backend, is actively developed, and supports FLUX.1-Kontext, the Qwen-Image-Edit series and
+FLUX.2 klein — models that genuinely follow an edit instruction. Decisively for this boundary,
+it exposes `sd_cancel_generation()`, so the cancellation `AssistantBackend.run` promises is real
+rather than aspirational. There is no SwiftPM package; you build an xcframework and add a C
+interop target, the way whisper.cpp is usually consumed.
+
+Two things to decide with it, in this order:
+
+- **Licence, before anything else.** FLUX.2-klein and Qwen-Image-Edit are Apache-2.0. FLUX.1
+  Kontext is not — it is the best-known of the three and the one you cannot ship commercially.
+- **Size.** GGUF through `stable-diffusion.cpp` is far kinder than MLX snapshots: the project
+  claims Kontext runs in 4–6 GB, against roughly 16 GB for a FLUX.2-klein bf16 MLX snapshot and
+  about 60 GB for Qwen-Image-Edit-2511 in MLX, which rules that one out. Either way the weights
+  are a multi-gigabyte download that cannot live in the app bundle, so they go in the app's own
+  container — which, per the table above, needs no entitlement.
+
+Memory is the constraint to watch, because it is unified and therefore competes with the open
+document. The best figure found was FLUX.2-klein-4B with encoder eviction: about 5 GB resident
+and a 10 GB peak at 768², described as fitting in 16 GB. Treat every number in this section as
+single-source and unmeasured until someone runs it on a real Mac — none of it could be checked
+from here.
+
+The shape it would take is a second planner operation — one that says "hand the whole layer to
+the generative backend with this prompt" — plus a `GenerativeBackend` behind it. The
 `AssistantBackend` protocol does not need to change to accommodate it, which was the point of
 keeping it neutral.
+
+### What `onda-ai` already solves, and what it decides
+
+`santeezi0325/onda-ai` is a model-agnostic capability gateway. It is **TypeScript** — zero
+runtime dependencies, plain `fetch` — so it cannot be linked into a Swift app. Compositor would
+reach it over HTTP, which is the local-server row of the table above: no entitlement change.
+
+It already has the capability we need. `AIGateway.editImage(ctx, { prompt, image, seed, signal })`
+takes a base64 `ImagePart` and returns image URLs or data URIs
+(`packages/ai/src/gateway.ts:373`). It takes an `AbortSignal`, so the cancellation this boundary
+promises maps straight through rather than being bolted on.
+
+Its registry picked `qwen-image-edit-2511` — Apache-2.0, 20B, instruction-based editing of a
+supplied photo, described there as "the genuinely self-hostable answer"
+(`packages/ai/src/registry/catalog.ts:376`). That is worth noting because the survey above
+arrived at the same model independently, from the opposite direction: Qwen-Image-Edit is one of
+the two Apache-2.0 families `stable-diffusion.cpp` supports. Same weights, two different places
+to run them.
+
+So the decision is not *which model*. It is **whose hardware**, and `onda-ai` is explicit that
+this is a boundary question rather than a performance one: every deployment declares itself
+`private` (our GPU), `processor` (a third party running open weights) or `vendor` (a proprietary
+API), and the router fails rather than exceeding what a request allows.
+
+| | Through `onda-ai` | On the user's Mac |
+|---|---|---|
+| How | HTTP to the gateway | `stable-diffusion.cpp` xcframework, GGUF weights |
+| Already built | the gateway, the registry, licence diligence, fallbacks, metering | nothing |
+| Still to build | the OpenAI-shaped image endpoint, which the catalog notes does not exist yet | C interop, weight download, the whole path |
+| Where the photo goes | off the Mac, to `private` or `processor` hardware | nowhere |
+| Hardware | 24 GB VRAM minimum quantized, 48 GB comfortable | a 24 GB-class Mac at best; not a 16 GB one |
+| Credentials | none for the self-hosted deployment (`keyOptional: true`); a token for Replicate | none |
+
+The honest reading: **`qwen-image-edit-2511` will not run on most users' Macs.** `onda-ai`'s own
+deployment notes put a 16 GB Mac at roughly 10–11 GB of GPU working set, against a 24 GB
+floor for this model quantized. So "inference on device" and "generative editing" are, for now,
+close to mutually exclusive on the hardware a Compositor user actually has — which is the real
+finding, and the thing to decide before any of this gets built.
+
+The two are not exclusive as *code*, though. Both sit behind `AssistantBackend` and can coexist:
+full-resolution adjustments locally with no network at all, and generative edits through
+whichever of the two you pick. That is what the neutral protocol bought.
 
 ### What the sandbox allows, whichever model it is
 
