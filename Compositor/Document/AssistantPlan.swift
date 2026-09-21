@@ -72,12 +72,12 @@ nonisolated enum AssistantStep: Equatable, Sendable {
         case .filter(let kind, _):
             // `PixelFilter.run` builds RGBA contexts throughout and blends with `isMask: false`.
             // Handing it an 8-bit gray mask would not fail loudly, it would produce garbage.
-            guard !targetIsMask else { throw AssistantPlanError.notForMask(kind.rawValue) }
+            guard !targetIsMask else { throw AssistantPlanError.notForMask(name) }
             // Content-Aware Fill synthesizes over the selection from what surrounds it, so
             // without a selection there is nothing for it to fill.
-            if kind == .contentAwareFill, !hasSelection { throw AssistantPlanError.needsSelection(kind.rawValue) }
+            if kind == .contentAwareFill, !hasSelection { throw AssistantPlanError.needsSelection(name) }
         case .color:
-            guard !targetIsMask else { throw AssistantPlanError.notForMask("Color") }
+            guard !targetIsMask else { throw AssistantPlanError.notForMask(name) }
         case .mask:
             guard targetIsMask else { throw AssistantPlanError.onlyForMask }
         }
@@ -288,6 +288,10 @@ nonisolated enum AssistantPlanRunner {
     static func run(_ plan: AssistantPlan, on source: CGImage, targetIsMask: Bool,
                     selection: SelectionClip?, pixelToDocument: CGAffineTransform,
                     seed: UInt32) async throws -> CGImage {
+        // Validated again here, although every caller already has. The cost is a walk over at
+        // most six steps; the thing it stops is a layer filter running against an 8-bit matte,
+        // which does not throw — it writes garbage into someone's document.
+        let plan = try plan.validated(targetIsMask: targetIsMask, hasSelection: selection != nil)
         var image = source
         for step in plan.steps {
             try Task.checkCancellation()

@@ -113,6 +113,21 @@ struct AssistantPlanTests {
         #expect(try mask(await planner.plan("invert it", for: .mask, history: [])).invert)
     }
 
+    @Test func thePartItCouldNotFollowIsSaidOutLoud() async throws {
+        // Doing half of what was asked in silence is worse than doing half and saying so.
+        let plan = try await KeywordAssistantPlanner().plan("brighten it, and put a hat on the cat",
+                                                            for: .layer, history: [])
+        #expect(plan.steps.count == 1)
+        #expect(plan.note.contains("did not follow"))
+        #expect(plan.note.contains("hat"))
+    }
+
+    @Test func politenessIsNotReportedAsSomethingItCouldNotDo() async throws {
+        let plan = try await KeywordAssistantPlanner().plan("brighter, please", for: .layer, history: [])
+        #expect(plan.steps.count == 1)
+        #expect(!plan.note.contains("did not follow"))
+    }
+
     @Test func anInstructionItCannotFollowIsRefusedRatherThanGuessedAt() async throws {
         await #expect(throws: AssistantError.notUnderstood("put a hat on the cat")) {
             try await KeywordAssistantPlanner().plan("put a hat on the cat", for: .layer, history: [])

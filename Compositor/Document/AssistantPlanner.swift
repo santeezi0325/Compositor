@@ -50,6 +50,10 @@ nonisolated struct KeywordAssistantPlanner: AssistantPlanner {
     let name = "Keywords"
     var isReady: Bool { true }
 
+    /// A clause shorter than this is courtesy rather than a request, and is passed over without
+    /// telling the user it was passed over.
+    static let reportableWords = 3
+
     func plan(_ instruction: String, for target: AssistantTarget,
               history: [AssistantTurn]) async throws -> AssistantPlan {
         try Task.checkCancellation()
@@ -59,12 +63,20 @@ nonisolated struct KeywordAssistantPlanner: AssistantPlanner {
         let text = Self.canonicalized(instruction)
         var steps: [AssistantStep] = []
         var notes: [String] = []
+        var skipped: [String] = []
         for clause in Self.clauses(text) {
-            guard let match = Self.match(clause, for: target) else { continue }
+            guard let match = Self.match(clause, for: target) else {
+                // Doing half of what was asked and saying nothing is the failure this planner
+                // exists to avoid, so what it passed over is reported. Only clauses with
+                // something in them, though: "please" is not a request that went unanswered.
+                if clause.split(separator: " ").count >= Self.reportableWords { skipped.append(clause) }
+                continue
+            }
             steps.append(match.step)
             notes.append(match.note)
         }
         guard !steps.isEmpty else { throw AssistantError.notUnderstood(instruction) }
+        if let missed = skipped.first { notes.append("I did not follow \"\(missed)\".") }
         return AssistantPlan(steps: steps, note: Self.sentence(from: notes))
     }
 
@@ -118,13 +130,10 @@ nonisolated struct KeywordAssistantPlanner: AssistantPlanner {
         return value
     }
 
-    /// Joins the per-clause notes into one sentence, since the panel shows one line per turn.
+    /// Joins the per-clause notes into one line, since the panel shows one per turn. Each note
+    /// is already a whole sentence, so they only need spacing.
     static func sentence(from notes: [String]) -> String {
-        switch notes.count {
-        case 0: "Done."
-        case 1: notes[0]
-        default: notes.dropLast().joined(separator: " ") + " " + notes[notes.count - 1]
-        }
+        notes.isEmpty ? "Done." : notes.joined(separator: " ")
     }
 
     // MARK: The phrase table
