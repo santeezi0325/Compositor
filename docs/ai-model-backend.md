@@ -240,49 +240,74 @@ everything this branch ships that is simply true and free: the planner emits num
 pixels, so the operations run on the layer's own raster at whatever size it is. There is no
 resampling and no quality loss anywhere in the path.
 
-It stops being free the moment a *generative* model is involved, and the premise is worse than
-"commonly around one megapixel" suggests: the two leading open edit models **hard-normalise**
-the input in their own reference code. FLUX.1 Kontext picks the nearest of 17 preferred
-resolutions, every one about 1.05 MP, and Lanczos-resizes the input to it; Qwen-Image-Edit
-computes its dimensions for a target area of exactly 1024×1024. A 6000×4000 layer handed to
-Kontext comes back at 1248×832. `AssistantPixels.normalized`
-(`Compositor/Document/AssistantBackend.swift:122`) would then write it back at `.high`
-interpolation — a 4.8× linear upscale, 23× by area. In a compositor that is the first thing a
-user would notice, and it is not recoverable afterwards.
+It stops being free the moment a *generative* model is involved, and the useful way to say why
+is **input, not output**. Every reference pipeline pins the *conditioning* image — the copy of
+your layer the model actually looks at. FLUX.1 Kontext resizes it to the nearest of 17 preferred
+resolutions, all about 1.05 MP. Qwen-Image-Edit resizes it for a target area of 1024×1024.
+FLUX.2 is more generous — Black Forest Labs' own code caps a single reference at 2024², about
+4.1 MP, and their blog claims "image editing at up to 4 megapixels" — but it is still a cap.
+Output size is a separate question and sometimes separately controllable, which is exactly the
+trap: a model can hand back 6000×4000 pixels having only ever *seen* one or four megapixels of
+your layer.
+
+So the number that matters is not what comes back, it is what went in. Take the returned picture
+and let `AssistantPixels.normalized` (`Compositor/Document/AssistantBackend.swift:122`) resample
+it onto the layer, and you get an upscale — 4.8× linear against Kontext, about 2.4× against
+FLUX.2 — of detail the model never had. In a compositor that is the first thing a user notices,
+and it is not recoverable afterwards.
 
 The way out is not a better upscaler. It is noticing that **resampling the model's picture is
 only one of three ways to use a model, and it is the worst one.** The edits people ask for split
 into three classes, and each gets its own policy:
 
 **Class 1 — the edit is a colour transfer.** Grading, white balance, exposure, film looks, broad
-relighting. You never need the model's pixels. Show it about a megapixel, take the before/after
-pair it returns, *fit a transform* from that pair, and evaluate the transform on the
+relighting. You never need the model's pixels. Show it what it was going to see anyway, take the
+before/after pair it returns, *fit a transform* from that pair, and evaluate the transform on the
 full-resolution original. This app already has the delivery vehicle: `CIColorCube` at 33 points per
 axis, which is exactly what `HueSaturationFilter` does today
 (`Compositor/Document/HueSaturation.swift:234`, `:241`). Bilateral Guided Upsampling is the
-published version of this idea and reports 1–2 ms to fit plus about 13 ms to apply on a 10 MP
-image. Lossless at full resolution, and the default this should reach for.
+published version of the idea.
+
+Two qualifications, because an earlier draft of this page called this "lossless" and it is not.
+BGU is a *fast approximation*, and its own paper holds it only where the operator "can be
+modeled as a local curve" — a generative colour grade may or may not be. And a 33³ global RGB
+cube is strictly weaker than what BGU fits, which is a grid of spatially varying local affine
+transforms; a cube cannot express "warmer in the shadows only". BGU's quoted 13 ms is its own
+grid slicing on a 2016 desktop CPU, not `CIColorCube` on Apple silicon, which nobody has
+measured here. What survives is the shape, and it is the part worth having: the full-resolution
+pixels come out of a full-resolution operator rather than out of an upscale.
 
 **Class 2 — the edit is a region.** Remove the background, brighten the subject, any local
-adjustment. Take the model's *mask*, not its pixels, upsample it against the full-resolution
-layer, and run Compositor's own full-resolution operation through it.
-`GuidedMatte.refine(mask:guide:radius:limit:)` (`Compositor/Document/GuidedMatte.swift:100`) is
-already precisely this pattern, written for a different reason: it runs the expensive filter on
-a copy no larger than `limit`, scales the radius by the same factor, and draws back up, letting
-the full-resolution guide supply the fine detail. A generative backend can reuse it as it
-stands.
+adjustment. Take the model's *mask*, not its pixels, refine it against the full-resolution
+layer, and run Compositor's own full-resolution operation through it. The arithmetic for that
+is already here — `GuidedMatte.filter(mask:guide:width:height:radius:epsilon:)`
+(`Compositor/Document/GuidedMatte.swift:45`) is a complete O(1) guided filter over `[Float]`
+that takes a mask and a guide at whatever size you hand it, so you draw the model's small mask
+up to the layer's size and run the filter there, with the full-resolution layer as the guide.
+`SubjectRemoval`'s committed path already does exactly that: `SubjectRemoval.swift:88` passes
+`limit: .greatestFiniteMagnitude`, so no reduction happens and the guided filter runs at full
+resolution. Then blend through it with `PixelAdjust.blend`.
 
-Prefer it over Core Image's own joint upsample, but for the reason the code gives rather than
-the one the comment gives. `GuidedMatte.swift:3–5` says `CIGuidedFilter` "does nothing on this
-system and its edge-preserving upsample barely moves the mask" — which runs two filters
-together: `CIGuidedFilter` is not a documented public Core Image filter at all, so that half is
-unsurprising rather than a platform finding, and `CIEdgePreserveUpsampleFilter` *is* documented
-and *is* used in this app, at `ObjectSelection.swift:68`. The real argument is what each call
-site does with its result. `ObjectSelection` reaches for the Core Image filter defensively
-(`if let filter … else { refined = coarse }`) and then thresholds the output to pure black and
-white at `:80`, so nothing subtle survives the trip. `SubjectRemoval` wants a soft matte that
-keeps hair, and for that it uses `GuidedMatte.refine` (`SubjectRemoval.swift:51`). A mask being
-lifted to full resolution is the second case.
+**Do not reach for `GuidedMatte.refine` for this**, which an earlier draft of this page
+recommended and was wrong about. `refine` (`GuidedMatte.swift:100`) downsamples the *guide*
+along with the mask (`:106`) and then scales the small result back up with a plain Core Graphics
+draw at `.high` (`:113–114`). The full-resolution guide never touches the output, so it is a
+bicubic upscale of a low-resolution matte, not a guided upsample against the real image. That is
+the right trade for what it was written for — the interactive preview at
+`SubjectRemoval.swift:104`, which passes `limit: 1400` so a slider stays responsive — and the
+wrong one for a mask that has to survive at full size.
+
+One note on Core Image's own joint upsample, since it is the obvious alternative.
+`GuidedMatte.swift:3–5` says `CIGuidedFilter` "does nothing on this system and its
+edge-preserving upsample barely moves the mask", but that sentence covers two different filters:
+`CIGuidedFilter` is not a documented public Core Image filter at all, so that half is
+unsurprising, and `CIEdgePreserveUpsampleFilter` *is* documented and *is* used in this app at
+`ObjectSelection.swift:68`. The comment is one developer's observation and was never
+independently checked. What the code shows is the better argument: `ObjectSelection` reaches for
+the Core Image filter defensively (`if let filter … else { refined = coarse }`) and then
+thresholds the output to pure black and white at `:80`, so nothing subtle survives the trip
+there either way. A soft matte at full size is a different job, and `GuidedMatte` is what this
+app uses for it.
 
 **Class 3 — the edit invents content.** Inpainting, object removal, adding or replacing things,
 restyling. Here there is no lossless path and no amount of cleverness makes one. The honest
@@ -297,17 +322,26 @@ size, say so in the UI rather than silently upscaling.
 diffusion was built to make large *generations* fit in small VRAM: every tile gets the same
 prompt (ControlNet Tile exists because that fails), and a tile holding half a lamppost has no
 idea what the other half looked like. It also does not lower the per-tile memory peak, so it
-buys nothing on the machine that needed help. On the measured numbers below, a 24 MP layer at
-1248×832 tiles is 25 tiles edge-to-edge, about 36 with overlap — 33 minutes at best, several
-hours at worst, for one edit behind a text field.
+buys nothing on the machine that needed help. A 24 MP layer at 1248×832 is 25 tiles
+edge-to-edge and 25–49 with overlap depending on how much you use, each one a full model run.
+Every per-tile timing I could find is single-source and states no resolution, so the total is
+not worth quoting to a decimal — but at any plausible per-tile cost this is tens of minutes to
+hours for one edit behind a text field, which is not a product.
 
 None of this needs the boundary to change shape, which is the point worth keeping.
 `AssistantResult` is `.pixels(CGImage)` and nothing in the protocol says those pixels came out of
-a model: a backend can downsample with `DownsampleCache` (Lanczos halvings,
-`Compositor/Rendering/DownsampleCache.swift:13`), run the model at 1 MP, fit a cube, apply it to
+a model: a backend can reduce the layer, run the model on the reduction, fit a cube, apply it to
 the full-resolution `request.image`, and return a full-size `CGImage` — at which point
 `normalized` takes its same-size branch at `AssistantBackend.swift:129–130` and copies with
-`.none` interpolation. Zero resampling loss, entirely inside the backend.
+`.none` interpolation. No resampling of the result at all, entirely inside the backend.
+
+`DownsampleCache` (`Compositor/Rendering/DownsampleCache.swift:13`) gets you most of the way
+down with good quality, but it is not a general resampler and should not be mistaken for one:
+it produces exact power-of-two Lanczos halvings only, capped at six, and each halving rounds up,
+so "the copy reaches up to 2^level − 1 source pixels past the right and bottom" (`:42–43`). It
+cannot hand a model an exact 1248×832. Use it for the bulk reduction and finish with one Core
+Graphics resample — which is cheap and harmless on the way *in*, since that copy is the model's
+to look at, not the user's to keep.
 
 One seam limit does get in the way, and it is class 2's: a backend cannot return a *mask* for a
 pixel target. `EditorSession+Assistant.swift:143` refuses that with
@@ -395,11 +429,35 @@ Two things to decide with it, in this order:
   are a multi-gigabyte download that cannot live in the app bundle, so they go in the app's own
   container — which, per the table above, needs no entitlement.
 
-Memory is the constraint to watch, because it is unified and therefore competes with the open
-document. The best figure found was FLUX.2-klein-4B with encoder eviction: about 5 GB resident
-and a 10 GB peak at 768², described as fitting in 16 GB. Treat every number in this section as
-single-source and unmeasured until someone runs it on a real Mac — none of it could be checked
-from here.
+**Memory is the constraint to watch, and the floor is genuinely unsettled.** It is unified
+memory, so the weights compete with the open document. The most encouraging number is Black
+Forest Labs' own: FLUX.2 [klein] 4B is Apache-2.0, does single- and multi-reference *editing*,
+and BFL's README says it "fits in ~8GB VRAM (RTX 3090/4070 and up)". If that transferred, a
+16 GB Mac would be in range and the whole hardware question would look different.
+
+Two reasons not to bank on it yet. "VRAM" and "offload to RAM" are discrete-GPU framing: on
+Apple silicon there is one pool, shared with the document and with `DownsampleCache`'s own
+100 MP of halvings, and no published Apple-silicon measurement of any of these models under
+`stable-diffusion.cpp` could be found. And the low figures that circulate for klein — around
+5 GB resident, 10 GB peak at 768² — are text-to-image runs; the figures explicitly tagged as
+*edit* runs for the same package are peaks around 20 GB. Editing carries reference images the
+text-to-image path does not.
+
+So the honest state of it: the floor might be 8 GB and might be 20, and the difference decides
+whether this runs on a normal Mac. **One measurement settles it** — `flux2-klein-4b-edit` at
+768² on a 16 GB machine, footprint recorded. Nobody has published it, and it cannot be taken
+from here. Treat every other number in this section the same way: single-source and unmeasured.
+
+**What could not be checked from here, in the order it would change a decision.** (1) The
+memory floor for an *edit* run of FLUX.2 [klein] 4B on a 16 GB Mac — the single measurement that
+decides whether the local route is viable at all. (2) Whether `stable-diffusion.cpp` on Metal
+performs anywhere near its discrete-GPU claims; no Apple-silicon benchmark for these models
+exists that I could find. (3) How well a colour cube fitted from a reduced before/after pair
+reproduces the model's intent at full size. (4) Whether `sd_cancel_generation()` aborts promptly
+enough to honour a `Task` cancel. All four need a real Mac. One thing that is *reported* and
+worth knowing while judging feasibility: Draw Things ships FLUX.1-Kontext editing on macOS and
+iPadOS, so on-device instruction editing is not hypothetical — I could not verify its resolution
+ceiling, which is the part that matters for a compositor.
 
 The shape it would take is a second planner operation — one that says "hand the whole layer to
 the generative backend with this prompt" — plus a `GenerativeBackend` behind it. The
