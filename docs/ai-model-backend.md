@@ -30,8 +30,16 @@ a typed plan rather than prose to be parsed. This branch uses it.
 public on-device image-editing model for a third-party Mac app, in any framework. The only
 headless generative image API Apple ever shipped has already been removed — that happened on
 the release that shipped last week — and its replacement is a modal sheet backed by a server
-model. Anything generative has to come from a
-third-party model, and the model worth having needs more memory than most Macs will give it.
+model. Anything generative has to come from a third-party model, and the model worth having
+needs more memory than most Macs will give it.
+
+**Full resolution is three answers, not one.** The open edit models normalise their input to
+about a megapixel in their own code, so handing one a 24-megapixel layer and resampling what
+comes back is a 4.8× upscale the user will see. Colour work can avoid that entirely by fitting
+a transform from a low-resolution pair and evaluating it full size, and region work by taking
+the model's mask instead of its pixels. Only content synthesis genuinely needs new pixels at
+full size, and for that there is no lossless answer at all. Details below; the machinery for
+the first two is already in this repository.
 
 So: ship the understanding half now over the app's own full-resolution operations, which is
 most of the value and all of the reliability, and treat the generative half as a second
