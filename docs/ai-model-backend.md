@@ -52,10 +52,21 @@ which of the app's operations that means, not looking at pixels.
   correctness" (WWDC25 session 286) — a `@Generable` enum always comes back as one of its cases.
   Structural validity is guaranteed; being *right* is not.
   ([Generable](https://developer.apple.com/documentation/foundationmodels/generable))
-- It is a **~3-billion-parameter, 2-bit-quantized** model, and Apple's own guidance is not to
-  use it for logical reasoning or arithmetic. That shaped the plan type: the model picks one
-  operation and one strength between −1 and 1, and the app does every conversion into pixels,
-  stops and degrees. Asking it to compute a blur radius would be asking the wrong thing of it.
+- **It is not one model, and an app cannot know which one it is talking to.** Apple's own page
+  says "there are 3 model versions", aligning with macOS 26.0–26.3, 26.4 and 27.0, and there is
+  a `variant` property to ask at runtime — with a whole documentation page called
+  [Updating prompts for new model
+  versions](https://developer.apple.com/documentation/foundationmodels/updating-prompts-for-new-model-versions).
+  The widely quoted figures (~3 billion parameters, 2-bit decoder weights, Apple advising
+  against arithmetic) describe the 2025 artifact, which is the *first* of those three; Apple
+  announced a rebuilt on-device generation in June 2026. Treat the published numbers as history
+  rather than a spec.
+
+  This is what shaped the plan type, and it is a better reason than "the model is small" was.
+  The model picks one operation and one strength between −1 and 1, and the app does every
+  conversion into pixels, stops and degrees. A narrow contract is what survives the model
+  underneath it changing three times in a year. Asking it to compute a blur radius would be
+  betting on a version.
 - Availability is a **runtime** condition, not a build-time one: the framework links against the
   macOS 26 SDK regardless, and `SystemLanguageModel.default.availability` reports
   `.available` or `.unavailable(.deviceNotEligible)` / `.unavailable(.modelNotReady)` and so on.
@@ -71,14 +82,23 @@ which of the app's operations that means, not looking at pixels.
 Two things to know, and they are nearer than they read. On **macOS 27 — the release people are
 running now** — the model can be given an image: `Attachment`, `ImageAttachmentContent` and
 `ImageReference` are all 27.0+, so "make the sky moodier" could be informed by whether there is
-in fact a sky. Reaching it means an `if #available(macOS 27, *)` branch, since the deployment
-target stays at 26.5; it is a real option today rather than something to wait for.
+in fact a sky. It is a real option today rather than something to wait for. But an
+`if #available(macOS 27, *)` branch is not the whole guard: seeing images is a *model
+capability*, not just an OS symbol, so the check is that branch **and**
+`model.capabilities.contains(.vision)`. Dispatching without it throws rather than degrading,
+and with more than one on-device variant in play the answer is not predictable from the OS
+version.
 
-And `LanguageModelSession.GenerationError` is bounded to 26.0–27.0, superseded by
-`LanguageModelError`. Availability in Swift is decided by the **SDK you compile against**, not
-by the deployment target — lowering the target does not keep a symbol the 27 SDK has dropped.
-This branch names neither type, so it is unaffected; anything that does will break on the build
-after the runner image takes Xcode 27, without a commit having changed.
+The second thing is error types, which do not survive the version bump cleanly.
+`LanguageModelSession.GenerationError` is bounded to 26.0–27.0 and does not become one
+replacement — it becomes several, including a separate `LanguageModelSession.Error` at 27.0+
+carrying `concurrentRequests` with no associated context, where the 26 case had one. A single
+`catch LanguageModelSession.GenerationError.concurrentRequests(let context)` written today
+simply will not match on 27. And availability in Swift is decided by the **SDK you compile
+against**, not by the deployment target: lowering the target does not keep a symbol the 27 SDK
+has dropped. This branch names none of these types, so it is unaffected; anything that does
+will break on the first build after the runner image takes Xcode 27, with no commit having
+changed.
 
 Not verified here: how good the model actually is at picking the right operation, its disk and
 RAM cost (Apple publishes neither), and whether `respond(to:generating:)` aborts inference when
