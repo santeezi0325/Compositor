@@ -296,8 +296,21 @@ VAE-encodes the image, renoises it, and denoises against a prompt describing the
 picture*. "Make the sky stormier" is read as a caption, not as a command — which is exactly the
 distinction that matters for an assistant. There is no FLUX.1 Kontext, Qwen-Image-Edit,
 Step1X-Edit or OmniGen in `mlx-swift-examples`, and none in ml-explore's *Python* `mlx-examples`
-either. Swift ports of the real edit models exist, but they are one-author projects — the
-hub for several of them has one star and a README saying it is not ready for use.
+either.
+
+Swift ports of the real edit models do exist outside ml-explore, and the licence is what rules
+them out rather than the maturity. [`mzbac/flux.swift`](https://github.com/mzbac/flux.swift) is
+mlx-swift-based, has 123 stars, and genuinely runs **FLUX.1-Kontext-dev**, image-to-image — it
+is the one thing found anywhere that follows an edit instruction in Swift on a Mac today. It is
+**GPLv3** (read from its `LICENSE` file, not from a badge), which for an MIT app distributed on
+the Mac App Store is the end of the conversation, and Kontext's weights are non-commercial on
+top of that. The same author's
+[`flux2.swift`](https://github.com/mzbac/flux2.swift) is **Apache-2.0** and does FLUX.2 klein
+image-to-image, which clears the licence on both code and weights — but it has 7 stars, and
+that is the whole of the usable Swift ecosystem. For contrast,
+[`liuliu/swift-diffusion`](https://github.com/liuliu/swift-diffusion) is BSD-3-Clause and well
+maintained, but it is Stable Diffusion v1.4 on the author's own s4nnc framework: no Kontext, no
+instruction editing.
 
 **Core ML is not the answer either**, which is the other place you would look. Apple's
 `ml-stable-diffusion` Swift package does implement image-to-image — shipping Mac apps prove it
