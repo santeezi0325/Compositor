@@ -35,17 +35,60 @@ fine, because the job here is reading "warm it up a bit and take the edge off" a
 which of the app's operations that means, not looking at pixels.
 
 - `@Generable` and `@Guide` make it emit a Swift type directly, so there is no prose to parse.
-  The framework converts the type to a JSON schema and constrains generation to it.
+  Generation is *constrained decoding*, which Apple says "fundamentally guarantees structural
+  correctness" (WWDC25 session 286) — a `@Generable` enum always comes back as one of its cases.
+  Structural validity is guaranteed; being *right* is not.
   ([Generable](https://developer.apple.com/documentation/foundationmodels/generable))
+- It is a **~3-billion-parameter, 2-bit-quantized** model, and Apple's own guidance is not to
+  use it for logical reasoning or arithmetic. That shaped the plan type: the model picks one
+  operation and one strength between −1 and 1, and the app does every conversion into pixels,
+  stops and degrees. Asking it to compute a blur radius would be asking the wrong thing of it.
 - Availability is a **runtime** condition, not a build-time one: the framework links against the
   macOS 26 SDK regardless, and `SystemLanguageModel.default.availability` reports
   `.available` or `.unavailable(.deviceNotEligible)` / `.unavailable(.modelNotReady)` and so on.
-  **Verified by this branch's own CI**: `FoundationModelsAssistantPlanner.swift` compiles on a
+  It needs Apple Intelligence switched on, on Apple silicon, in a supported language — so an
+  Intel Mac (macOS 26 is the last Intel release), a Mac with the toggle off, and a CI runner all
+  report unavailable. **The keyword planner is therefore not polish, it is the load-bearing
+  path** on that hardware and in CI.
+- **Verified by this branch's own CI**: `FoundationModelsAssistantPlanner.swift` compiles on a
   GitHub Actions `macos-latest` runner, where Apple Intelligence is certainly not switched on.
-- Apple is still shipping it: the docs list model versions for 26.0–26.3, 26.4 and 27.0.
+- Bundle cost is zero. The weights are a shared OS asset the user downloads by enabling Apple
+  Intelligence, so there is no download UX, no cache directory and no first-run wait that we own.
 
-Not verified here: how good the 3B model actually is at picking the right operation, and
-whether `respond(to:generating:)` aborts inference when its task is cancelled. Both need a Mac.
+Two things to know for later. On **macOS 27** the model can be given an image —
+`Attachment`, `ImageAttachmentContent` and `ImageReference` are all 27.0+ — so "make the sky
+moodier" could one day be informed by whether there is in fact a sky. And
+`LanguageModelSession.GenerationError` is bounded to 26.0–27.0, superseded by
+`LanguageModelError`; this branch does not name either type, but anything that does will need
+attention when the app builds against the Xcode 27 SDK.
+
+Not verified here: how good the model actually is at picking the right operation, its disk and
+RAM cost (Apple publishes neither), and whether `respond(to:generating:)` aborts inference when
+its task is cancelled. All need a Mac.
+
+### Vision and Core Image: the operations worth planning over
+
+This is why the planning half is worth shipping on its own. Core Image has around 180
+documented built-in filters, deterministic and at full resolution, and Vision adds on-device
+subject masking — all with **zero added bundle size, no entitlement and no availability gate**
+on macOS 26.
+
+Together that genuinely covers "warm it up a bit", "remove the background", "feather the mask
+six pixels", "straighten this". What it cannot do is anything needing new image content, and —
+the limit people underestimate — **anything needing semantic selection**. Vision on macOS 26
+has no class-labelled segmentation beyond person and unlabelled foreground instances, so
+"select the red car" and "select the sky" are out for the same reason "paint a new sky" is.
+
+One precise detail worth knowing, because it bears directly on the full-resolution question:
+Vision's raw `instanceMask` is a **fixed 512×512 grid** whatever the input size, while
+`generateScaledMask(for:scaledToImageFrom:)` returns a mask at the input's own resolution. The
+app already uses both — `SubjectRemoval.swift:35` takes the scaled one, `ObjectSelection.swift:46`
+takes the low-resolution one and upsamples. Remove Background through the assistant is the
+scaled path, so it really is full resolution.
+
+macOS 27 adds click-and-scribble-to-segment (`GenerateIterativeSegmentationRequest`), which
+would be the natural way to reach "select that" — but it is 27-only and downloads its own
+weights, so it breaks both the deployment target and the no-weights story.
 
 ### Generative pixels: no
 
@@ -137,7 +180,8 @@ Worth knowing before anyone plans around it, and true no matter what model goes 
   selected it first. The assistant cannot make the selection itself — it never sees the image.
 - **Blurring one part of a picture is not reachable.** "Blur the background" blurs the layer.
   Region-aware editing needs the planner to be able to ask for a mask, which is the natural next
-  step and is not in this branch.
+  step and is not in this branch. Note that even with it, the region has to be one Vision can
+  find: the subject, or the foreground. There is no "the sky" and no "the red car" on macOS 26.
 
 ## If you want generative editing
 

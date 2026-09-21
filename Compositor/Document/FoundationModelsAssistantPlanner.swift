@@ -16,10 +16,13 @@ import Foundation
 /// nowhere to store one, and guided generation makes it emit a typed plan rather than prose to
 /// be parsed.
 ///
-/// What it cannot do is make pixels. It is a text model and never sees the layer, so anything
-/// that needs new image content — "add a hat", "make the sky stormy", "remove the lamppost and
-/// invent what was behind it" — is outside this planner and outside what the app can do on
-/// device today. See `docs/ai-model-backend.md`.
+/// What it cannot do is make pixels. It is a text model, and on this app's deployment target it
+/// never sees the layer either — `Attachment` and `ImageReference` are macOS 27 and up — so
+/// anything that needs new image content ("add a hat", "make the sky stormy") is outside this
+/// planner and outside what the app can do on device today. It also cannot ask for a region it
+/// has no way to find: Vision on macOS 26 segments the subject and the foreground, and nothing
+/// class-labelled, so "the sky" is as far out of reach as painting one.
+/// See `docs/ai-model-backend.md`.
 ///
 /// ## Unverified
 /// These containers are Linux, so what follows is read from Apple's documentation rather than
