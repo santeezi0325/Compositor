@@ -23,6 +23,27 @@ nonisolated struct AssistantRequest: @unchecked Sendable {
     let instruction: String
     /// The canvas in document points, for a backend that needs to know where the layer sits.
     let canvasSize: CGSize
+    /// The selection as it stood when the run began, frozen on the main actor, or `nil` when
+    /// nothing is selected.
+    ///
+    /// A backend does not have to honor this and most should not: `EditorSession` blends the
+    /// finished result back through the same selection, so constraining the edit here as well
+    /// would apply the coverage twice and eat soft selection edges. It is carried for the one
+    /// operation that cannot work without knowing the shape — Content-Aware Fill synthesizes
+    /// over the selection from the pixels around it, so with no selection it has nothing to do.
+    let selection: SelectionClip?
+    /// Maps the target's own pixels into document space, which is the space `selection` is in.
+    let pixelToDocument: CGAffineTransform
+
+    init(image: CGImage?, targetIsMask: Bool, instruction: String, canvasSize: CGSize,
+         selection: SelectionClip? = nil, pixelToDocument: CGAffineTransform = .identity) {
+        self.image = image
+        self.targetIsMask = targetIsMask
+        self.instruction = instruction
+        self.canvasSize = canvasSize
+        self.selection = selection
+        self.pixelToDocument = pixelToDocument
+    }
 }
 
 /// What came back. A backend may work at whatever resolution suits it: the result is
@@ -81,8 +102,9 @@ nonisolated enum AssistantError: LocalizedError, Equatable {
         case .tooLarge:
             "The assistant returned an image beyond the 100-megapixel budget."
         case .notUnderstood(let instruction):
-            "The placeholder assistant does not know how to \"\(instruction)\". It understands: invert, "
-                + "brighter, darker, warmer, cooler, black and white, and blur."
+            "The assistant did not follow \"\(instruction)\". Try naming the change directly — "
+                + "brighter, more contrast, warmer, black and white, blur, sharpen, remove the "
+                + "background — or turn on Apple Intelligence for instructions in your own words."
         }
     }
 }
@@ -146,84 +168,5 @@ nonisolated enum AssistantPixels {
             context.draw(image, in: bounds)
         }
         context.restoreGState()
-    }
-}
-
-// MARK: - Placeholder
-
-/// Stands in for a real model until one is wired in, so the whole loop — prompt, edit,
-/// repaint, undo — is provable with no network and no weights. It reads a handful of
-/// instructions and refuses the rest rather than guessing, because a placeholder that
-/// silently does the wrong thing is worse than one that says it does not know.
-nonisolated struct PlaceholderAssistantBackend: AssistantBackend {
-    let name = "Placeholder"
-
-    private enum Edit: CaseIterable {
-        case invert, brighter, darker, warmer, cooler, monochrome, blur
-
-        /// The words that pick this edit, longest phrases first so "black and white" wins
-        /// over a bare "white".
-        var triggers: [String] {
-            switch self {
-            case .invert: ["invert", "negative", "flip the colors", "flip the colours"]
-            case .brighter: ["brighter", "brighten", "lighter", "lighten"]
-            case .darker: ["darker", "darken"]
-            case .warmer: ["warmer", "warm it", "warm up"]
-            case .cooler: ["cooler", "cool it", "cool down", "colder"]
-            case .monochrome: ["black and white", "greyscale", "grayscale", "monochrome", "desaturate"]
-            case .blur: ["blur", "soften", "out of focus"]
-            }
-        }
-
-        var note: String {
-            switch self {
-            case .invert: "Inverted the colors."
-            case .brighter: "Brightened it."
-            case .darker: "Darkened it."
-            case .warmer: "Warmed it up."
-            case .cooler: "Cooled it down."
-            case .monochrome: "Took the color out."
-            case .blur: "Softened it."
-            }
-        }
-
-        func apply(to image: CIImage) -> CIImage {
-            switch self {
-            case .invert:
-                image.applyingFilter("CIColorInvert")
-            case .brighter:
-                image.applyingFilter("CIColorControls", parameters: [kCIInputBrightnessKey: 0.15])
-            case .darker:
-                image.applyingFilter("CIColorControls", parameters: [kCIInputBrightnessKey: -0.15])
-            case .warmer:
-                image.applyingFilter("CITemperatureAndTint", parameters: ["inputTargetNeutral": CIVector(x: 7500, y: 0)])
-            case .cooler:
-                image.applyingFilter("CITemperatureAndTint", parameters: ["inputTargetNeutral": CIVector(x: 5000, y: 0)])
-            case .monochrome:
-                image.applyingFilter("CIColorControls", parameters: [kCIInputSaturationKey: 0])
-            case .blur:
-                // Clamped first, or the blur pulls transparency in from beyond the edge.
-                image.clampedToExtent().applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: 4])
-                    .cropped(to: image.extent)
-            }
-        }
-    }
-
-    // `nonisolated async` already runs off the main actor, so the pixel work needs no
-    // detached task — which is the point: a detached task would finish after a cancel.
-    func run(_ request: AssistantRequest, history: [AssistantTurn]) async throws -> AssistantResult {
-        try Task.checkCancellation()
-        let instruction = request.instruction.lowercased()
-        guard let edit = Edit.allCases.first(where: { $0.triggers.contains { instruction.contains($0) } }) else {
-            throw AssistantError.notUnderstood(request.instruction)
-        }
-        guard let source = request.image else {
-            return AssistantResult(output: .none, note: "There are no pixels to work on.")
-        }
-        let rendered = try PixelAdjust.render(edit.apply(to: CIImage(cgImage: source)),
-                                              width: source.width, height: source.height,
-                                              isMask: request.targetIsMask)
-        try Task.checkCancellation()
-        return AssistantResult(output: request.targetIsMask ? .mask(rendered) : .pixels(rendered), note: edit.note)
     }
 }

@@ -123,7 +123,8 @@ extension EditorSession {
             // never be carried across a suspension.
             let clip = try selection?.clip(canvas: document.size)
             let request = AssistantRequest(image: source, targetIsMask: targetIsMask,
-                                           instruction: instruction, canvasSize: document.size)
+                                           instruction: instruction, canvasSize: document.size,
+                                           selection: clip, pixelToDocument: mapping)
             // Awaited in this task. `isProjectBusy` is deliberately *not* held across this leg:
             // a model can take seconds and the editor has to stay usable. The price is that the
             // document may change underneath, which the guard further down catches.

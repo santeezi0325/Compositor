@@ -254,8 +254,9 @@ final class EditorSession {
     /// than in the view because `ProjectTabs` rebuilds `ContentView` per tab.
     var assistant: AssistantConversation?
     /// The model behind the assistant. Swapping this is the whole point of `AssistantBackend`;
-    /// the placeholder proves the loop with no network and no weights.
-    @ObservationIgnored var assistantBackend: any AssistantBackend = PlaceholderAssistantBackend()
+    /// the standard one plans with the on-device model where there is one and with a phrase
+    /// table where there is not, and executes either plan with the app's own filters.
+    @ObservationIgnored var assistantBackend: any AssistantBackend = PlanningAssistantBackend.standard
     var filterSettings = FilterSettings()
     @ObservationIgnored var hueSaturationTask: Task<Void, Never>?
     /// The newest preview request while one is already rendering.

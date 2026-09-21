@@ -284,10 +284,13 @@ nonisolated enum TestRasters {
         #expect(s.canRunAssistant == false)
     }
 
-    // MARK: The placeholder backend
+    // MARK: The shipping backend
 
-    @Test func thePlaceholderEditsWhatItUnderstands() async throws {
+    @Test func theAssistantEditsWhatItUnderstands() async throws {
         let s = try fixture()
+        // Pinned to the phrase table: on a Mac where Apple Intelligence is on, the standard
+        // backend would plan with the model instead and this would not be a fixed assertion.
+        s.assistantBackend = PlanningAssistantBackend(planners: [KeywordAssistantPlanner()])
         let original = try #require(s.activeLayer?.asset?.image)
         let conversation = try await send(s, "make it black and white")
         #expect(conversation.error == nil)
@@ -298,11 +301,12 @@ nonisolated enum TestRasters {
         #expect(abs(r - b) <= 2, "Desaturated, so the channels agree")
     }
 
-    @Test func thePlaceholderSaysSoRatherThanGuessing() async throws {
+    @Test func theAssistantSaysSoRatherThanGuessing() async throws {
         let s = try fixture()
+        s.assistantBackend = PlanningAssistantBackend(planners: [KeywordAssistantPlanner()])
         let original = try #require(s.activeLayer?.asset?.image)
         let conversation = try await send(s, "put a hat on the cat")
         #expect(s.activeLayer?.asset?.image === original)
-        #expect(conversation.error?.contains("does not know how to") == true)
+        #expect(conversation.error?.contains("did not follow") == true)
     }
 }
