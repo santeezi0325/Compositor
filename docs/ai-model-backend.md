@@ -200,6 +200,15 @@ Step1X-Edit or OmniGen in `mlx-swift-examples`, and none in ml-explore's *Python
 either. Swift ports of the real edit models exist, but they are one-author projects — the
 hub for several of them has one star and a README saying it is not ready for use.
 
+**Core ML is not the answer either**, which is the other place you would look. Apple's
+`ml-stable-diffusion` Swift package does implement image-to-image — shipping Mac apps prove it
+— but img2img is the "rewrites everything against a caption" behaviour, not instruction
+following. Converted InstructPix2Pix weights exist, yet the Swift pipeline cannot drive them:
+it builds the 8-channel latent from pure noise instead of concatenating the image latent, and
+does two-way classifier-free guidance where InstructPix2Pix needs three. Making it work means
+forking and reimplementing the denoising loop, against a repository whose newest dependency pin
+is from September 2024 and whose SD3 path depends on a project archived in March 2026.
+
 **The runtime that actually does this today is C++.** `stable-diffusion.cpp` is MIT, has a Metal
 backend, is actively developed, and supports FLUX.1-Kontext, the Qwen-Image-Edit series and
 FLUX.2 klein — models that genuinely follow an edit instruction. Decisively for this boundary,
