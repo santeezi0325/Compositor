@@ -5,7 +5,7 @@ on:
   # every commit twice, since a push and a pull_request event cannot share a concurrency
   # group. Use the manual run for a branch that has no pull request yet.
   push:
-    branches: [main]
+    branches: [main, claude/upstream-main-check]
   pull_request:
   workflow_dispatch:
 
