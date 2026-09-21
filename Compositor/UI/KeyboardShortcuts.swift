@@ -94,7 +94,7 @@ struct ShortcutDefinition: Identifiable {
             entry("Move Layer Down", "[", 1, menu: true), entry("Merge Layers", "e", 1, menu: true),
             entry("Show Grid", "'", 1, menu: true), entry("Show Guides", ";", 1, menu: true),
             entry("Show Rulers", "r", 1, menu: true), entry("Snap", ";", 9, menu: true),
-            entry("Lock Guides", ";", 3, menu: true)
+            entry("Lock Guides", ";", 3, menu: true), entry("AI Assistant", "k", 9, menu: true)
         ]
         for (title, key) in [("Select tool", "a"), ("Move / Transform tool", "v"), ("Hand tool", "h"),
             ("Zoom tool", "z"), ("Brush tool", "b"), ("Eraser", "e"), ("Spot Healing", "j"),
