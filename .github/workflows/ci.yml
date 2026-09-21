@@ -1,14 +1,15 @@
 name: CI
 
 on:
+  # Branches are covered by `pull_request`. Triggering on their pushes as well would build
+  # every commit twice, since a push and a pull_request event cannot share a concurrency
+  # group. Use the manual run for a branch that has no pull request yet.
   push:
-    branches: [main, 'claude/**']
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
 concurrency:
-  # Keyed on the pull request where there is one, so the branch push and the pull_request
-  # event do not build the same commit twice.
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
