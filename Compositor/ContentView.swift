@@ -8,6 +8,11 @@ struct ContentView: View {
     var applicationDelegate: CompositorApplicationDelegate? = nil
     @Environment(\.openWindow) private var openWindow
     @State private var canvasFrame: CGRect = .zero
+    @State private var levelsPanel = FloatingPanelController(name: "levelsPanel")
+    @State private var adjustmentPanel = FloatingPanelController(name: "adjustmentPanel")
+    @State private var selectionAmountPanel = FloatingPanelController(name: "selectionAmountPanel")
+    @State private var filterPanel = FloatingPanelController(name: "filterPanel")
+    @State private var effectsPanel = FloatingPanelController(name: "effectsPanel")
     @State private var isDropTargeted = false
     /// The window's width, so the tab strip can use the toolbar's free space.
     @State private var windowWidth: CGFloat = 1180
@@ -16,8 +21,9 @@ struct ContentView: View {
         guard let workspace = applicationDelegate?.workspace else { return true }
         return workspace.canReceiveDrag(into: workspace.current.id)
     }
-    var body: some View {
-        VStack(spacing: 0) {
+    // Extracted from `body`: as one expression the type checker times out (Xcode 26.1).
+    @ViewBuilder private var toolHeaders: some View {
+        Group {
             if session.tool == .move {
                 TransformInspector(session: session).id(session.activeLayerID)
                 Divider()
@@ -66,6 +72,12 @@ struct ContentView: View {
                 }.padding(.horizontal, 18).toolHeaderBar()
                 Divider()
             }
+        }
+    }
+
+    @ViewBuilder private var editorStack: some View {
+        VStack(spacing: 0) {
+            toolHeaders
             HStack(spacing: 0) {
                 toolRail
                 Divider()
@@ -97,6 +109,11 @@ struct ContentView: View {
             statusBar.fixedSize(horizontal: false, vertical: true)
                 .modifier(WidthReader(width: $windowWidth))
         }
+    }
+
+    // Split again for 1.1: the chain outgrew the type checker once more.
+    @ViewBuilder private var editorChrome: some View {
+        editorStack
         .background(Color(white: 0.14))
         .background {
             if let applicationDelegate, applicationDelegate.projects.workspace == nil {
@@ -169,11 +186,76 @@ struct ContentView: View {
                 }.help("Zoom out (⌘−)").disabled(session.document == nil)
             }
         }
-        .toolPanels(session: session)
+    }
+
+    var body: some View {
+        editorChrome
+        .onChange(of: session.levels == nil) { _, closed in
+            if closed { levelsPanel.close() }
+            else {
+                levelsPanel.onClose = { session.cancelLevels() }
+                levelsPanel.show(title: "Levels", content: LevelsSheet(session: session))
+            }
+        }
+        .onChange(of: session.hueSaturation == nil) { _, closed in
+            if closed { adjustmentPanel.close() }
+            else {
+                adjustmentPanel.onClose = { session.cancelHueSaturation() }
+                adjustmentPanel.show(title: "Hue/Saturation", content: HueSaturationSheet(session: session))
+            }
+        }
+        .onChange(of: session.effectsEditing) { _, selection in
+            if let selection {
+                effectsPanel.onClose = { session.finishEffectsEditing(commit: false) }
+                effectsPanel.show(title: selection.kind.rawValue, content: EffectsSheet(session: session, kind: selection.kind))
+            } else { effectsPanel.close() }
+        }
+        .onChange(of: session.document?.layers) { _, layers in
+            if let editing = session.effectsEditing,
+               layers?.first(where: { $0.id == editing.layerID })?.effects?.contains(editing.kind) != true {
+                if let picker = session.colorPicker, case .effect = picker.target { session.closeColorPicker(commit: false) }
+                session.effectsEditing = nil
+                session.effectsEditingOriginal = nil
+            }
+        }
+        .onChange(of: session.selectionAmountOperation) { _, operation in
+            if let operation {
+                selectionAmountPanel.onClose = { session.selectionAmountOperation = nil }
+                selectionAmountPanel.show(title: operation.rawValue + " Selection",
+                    content: SelectionAmountSheet(session: session, operation: operation))
+            } else { selectionAmountPanel.close() }
+        }
+        .onChange(of: session.filterEdit == nil) { _, closed in
+            if closed { filterPanel.close() }
+            else {
+                filterPanel.onClose = { session.cancelFilter() }
+                filterPanel.show(title: session.filterEdit?.kind.rawValue ?? "Filter", content: FilterSheet(session: session))
+            }
+        }
         .onChange(of: session.document == nil) { _, empty in
             if !empty { session.canvasFocusRequest += 1 }
         }
-        .editorAlerts(session: session)
+        .fileImporter(isPresented: $session.showsImporter,
+                      allowedContentTypes: UTType.importableImages, allowsMultipleSelection: true) { result in
+            switch result {
+            case .success(let urls): Task { await session.importImages(urls) }
+            case .failure(let error):
+                if (error as NSError).code != NSUserCancelledError { session.importError = error.localizedDescription }
+            }
+        }
+        .alert("Import couldn’t finish", isPresented: Binding(
+            get: { session.importError != nil }, set: { if !$0 { session.importError = nil } })) {
+                Button("OK", role: .cancel) { session.importError = nil }
+            } message: { Text(session.importError ?? "") }
+        .alert("Couldn’t paint", isPresented: Binding(get: { session.brushError != nil },
+            set: { if !$0 { session.brushError = nil } })) {
+                Button("OK") { session.brushError = nil }
+            } message: { Text(session.brushError ?? "") }
+        .alert("Couldn’t crop", isPresented: Binding(get: { session.cropError != nil },
+            set: { if !$0 { session.cropError = nil } })) {
+                Button("OK") { session.cropError = nil }
+            } message: { Text(session.cropError ?? "") }
+        .modifier(AssistantPanel(session: session))
     }
     private func requestNewCanvas() {
         if let applicationDelegate { Task { await applicationDelegate.projects.newCanvas() } }
@@ -358,106 +440,22 @@ extension View {
     }
 }
 
-/// The tool dialogs that open in floating panels, and the session state each one follows.
-/// Kept out of the editor's body, whose type-checking is already near its limit: with these
-/// closures inline the body stopped type-checking altogether on a clean toolchain.
-private struct ToolPanels: ViewModifier {
+/// The AI assistant's panel. Out of the body for the reason `WidthReader` gives, and because the panel outlives
+/// any one of the editor's sheets: the assistant is a conversation, not a one-shot dialog, so it stays put when
+/// the app loses focus instead of vanishing the way the tool dialogs do.
+private struct AssistantPanel: ViewModifier {
     let session: EditorSession
-    @State private var levelsPanel = FloatingPanelController(name: "levelsPanel")
-    @State private var adjustmentPanel = FloatingPanelController(name: "adjustmentPanel")
-    @State private var selectionAmountPanel = FloatingPanelController(name: "selectionAmountPanel")
-    @State private var filterPanel = FloatingPanelController(name: "filterPanel")
-    @State private var effectsPanel = FloatingPanelController(name: "effectsPanel")
-    /// The assistant is a conversation, not a one-shot dialog, so its panel stays put when the
-    /// app loses focus instead of vanishing the way the tool dialogs do.
-    @State private var assistantPanel = FloatingPanelController(name: "assistantPanel", hidesOnDeactivate: false)
+    @State private var panel = FloatingPanelController(name: "assistantPanel", hidesOnDeactivate: false)
 
     func body(content: Content) -> some View {
-        content
-            .onChange(of: session.levels == nil) { _, closed in
-                if closed { levelsPanel.close() }
-                else {
-                    levelsPanel.onClose = { session.cancelLevels() }
-                    levelsPanel.show(title: "Levels", content: LevelsSheet(session: session))
-                }
+        content.onChange(of: session.assistant == nil) { _, closed in
+            if closed { panel.close() }
+            else {
+                panel.onClose = { session.closeAssistant() }
+                panel.show(title: "AI Assistant", content: AssistantSheet(session: session))
             }
-            .onChange(of: session.hueSaturation == nil) { _, closed in
-                if closed { adjustmentPanel.close() }
-                else {
-                    adjustmentPanel.onClose = { session.cancelHueSaturation() }
-                    adjustmentPanel.show(title: "Hue/Saturation", content: HueSaturationSheet(session: session))
-                }
-            }
-            .onChange(of: session.effectsEditing) { _, selection in
-                if let selection {
-                    effectsPanel.onClose = { session.finishEffectsEditing(commit: false) }
-                    effectsPanel.show(title: selection.kind.rawValue, content: EffectsSheet(session: session, kind: selection.kind))
-                } else { effectsPanel.close() }
-            }
-            .onChange(of: session.document?.layers) { _, layers in
-                if let editing = session.effectsEditing,
-                   layers?.first(where: { $0.id == editing.layerID })?.effects?.contains(editing.kind) != true {
-                    if let picker = session.colorPicker, case .effect = picker.target { session.closeColorPicker(commit: false) }
-                    session.effectsEditing = nil
-                    session.effectsEditingOriginal = nil
-                }
-            }
-            .onChange(of: session.selectionAmountOperation) { _, operation in
-                if let operation {
-                    selectionAmountPanel.onClose = { session.selectionAmountOperation = nil }
-                    selectionAmountPanel.show(title: operation.rawValue + " Selection",
-                        content: SelectionAmountSheet(session: session, operation: operation))
-                } else { selectionAmountPanel.close() }
-            }
-            .onChange(of: session.filterEdit == nil) { _, closed in
-                if closed { filterPanel.close() }
-                else {
-                    filterPanel.onClose = { session.cancelFilter() }
-                    filterPanel.show(title: session.filterEdit?.kind.rawValue ?? "Filter", content: FilterSheet(session: session))
-                }
-            }
-            .onChange(of: session.assistant == nil) { _, closed in
-                if closed { assistantPanel.close() }
-                else {
-                    assistantPanel.onClose = { session.closeAssistant() }
-                    assistantPanel.show(title: "AI Assistant", content: AssistantSheet(session: session))
-                }
-            }
+        }
     }
-}
-
-/// Importing, and the errors the editor reports. Out of the body for the same reason.
-private struct EditorAlerts: ViewModifier {
-    @Bindable var session: EditorSession
-
-    func body(content: Content) -> some View {
-        content
-            .fileImporter(isPresented: $session.showsImporter,
-                          allowedContentTypes: [.jpeg, .png, .heic, .tiff], allowsMultipleSelection: true) { result in
-                switch result {
-                case .success(let urls): Task { await session.importImages(urls) }
-                case .failure(let error):
-                    if (error as NSError).code != NSUserCancelledError { session.importError = error.localizedDescription }
-                }
-            }
-            .alert("Import couldn’t finish", isPresented: Binding(
-                get: { session.importError != nil }, set: { if !$0 { session.importError = nil } })) {
-                    Button("OK", role: .cancel) { session.importError = nil }
-                } message: { Text(session.importError ?? "") }
-            .alert("Couldn’t paint", isPresented: Binding(get: { session.brushError != nil },
-                set: { if !$0 { session.brushError = nil } })) {
-                    Button("OK") { session.brushError = nil }
-                } message: { Text(session.brushError ?? "") }
-            .alert("Couldn’t crop", isPresented: Binding(get: { session.cropError != nil },
-                set: { if !$0 { session.cropError = nil } })) {
-                    Button("OK") { session.cropError = nil }
-                } message: { Text(session.cropError ?? "") }
-    }
-}
-
-private extension View {
-    func toolPanels(session: EditorSession) -> some View { modifier(ToolPanels(session: session)) }
-    func editorAlerts(session: EditorSession) -> some View { modifier(EditorAlerts(session: session)) }
 }
 
 /// Reports the width it is laid out at. Kept out of the editor's body, whose type-checking is already near its limit.
