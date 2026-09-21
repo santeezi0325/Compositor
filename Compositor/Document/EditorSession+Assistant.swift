@@ -90,7 +90,7 @@ extension EditorSession {
         }
         // Gate, and settle the target before reading anything from the layer.
         guard canRunAssistant, let document, let layer = activeLayer,
-              let index = document.layers.firstIndex(where: { $0.id == layer.id }) else {
+              document.layers.contains(where: { $0.id == layer.id }) else {
             conversation.error = AssistantError.noTarget.localizedDescription
             return
         }
@@ -157,8 +157,11 @@ extension EditorSession {
             // hold again here, including the target.
             guard canRunAssistant, isMaskSelected == targetIsMask else { throw AssistantError.targetChanged }
             // Re-read through `self`: `document` above is the value as it was before the await.
-            guard let current = self.document?.layers[safe: index], current.id == layerID,
-                  current.asset?.image === startImage,
+            // By id rather than by the index captured then, because the layer may have moved.
+            guard let layers = self.document?.layers,
+                  let row = layers.firstIndex(where: { $0.id == layerID }) else { throw AssistantError.targetChanged }
+            let current = layers[row]
+            guard current.asset?.image === startImage,
                   current.mask?.asset.image === startMaskImage,
                   current.transform == startTransform else { throw AssistantError.targetChanged }
             isProjectBusy = true
@@ -171,12 +174,12 @@ extension EditorSession {
             if targetIsMask {
                 // Assign the mask directly. Rebuilding the `ImageLayer` here would be a way to
                 // drop something from it for nothing.
-                self.document?.layers[index].mask = current.mask.map { $0.replacing(made) } ?? LayerMask(asset: made)
-                self.document?.layers[index].mask?.isEnabled = true
+                self.document?.layers[row].mask = current.mask.map { $0.replacing(made) } ?? LayerMask(asset: made)
+                self.document?.layers[row].mask?.isEnabled = true
             } else {
                 // `isGroup` and `effects` are carried, not defaulted: eight commit paths in
                 // this app quietly drop a layer's drop shadow by leaving `effects` out.
-                self.document?.layers[index] = ImageLayer(id: current.id, asset: made, name: current.name,
+                self.document?.layers[row] = ImageLayer(id: current.id, asset: made, name: current.name,
                     isVisible: current.isVisible, transform: current.transform, parentID: current.parentID,
                     isGroup: current.isGroup, opacity: current.opacity, blendMode: current.blendMode,
                     mask: current.mask, maskSourceID: current.maskSourceID, effects: current.effects)

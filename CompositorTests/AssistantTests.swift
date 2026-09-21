@@ -7,7 +7,7 @@ import Testing
 /// closure over `CGImage`, which is what every raster type in this app does.
 struct StubAssistantBackend: AssistantBackend, @unchecked Sendable {
     let name = "Stub"
-    let answer: (AssistantRequest) throws -> AssistantResult
+    let answer: @Sendable (AssistantRequest) throws -> AssistantResult
     func run(_ request: AssistantRequest, history: [AssistantTurn]) async throws -> AssistantResult {
         try Task.checkCancellation()
         return try answer(request)
@@ -36,6 +36,33 @@ final class RequestRecorder: @unchecked Sendable {
     var seen: AssistantRequest? { lock.lock(); defer { lock.unlock() }; return request }
 }
 
+/// Raster fixtures. Outside the test type so the stub closures, which run off the test's
+/// own actor, capture nothing main-actor-isolated.
+nonisolated enum TestRasters {
+    static func inverted(_ image: CGImage?) throws -> CGImage {
+        guard let image else { throw AssistantError.noTarget }
+        return try PixelAdjust.render(CIImage(cgImage: image).applyingFilter("CIColorInvert"),
+                                      width: image.width, height: image.height, isMask: false)
+    }
+
+    /// A solid RGBA image of one color, at any size the caller likes.
+    static func solid(_ gray: CGFloat, width: Int, height: Int) throws -> CGImage {
+        let ctx = try BrushRaster.context(width: width, height: height, mask: false)
+        ctx.setFillColor(CGColor(srgbRed: gray, green: gray, blue: gray, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        guard let image = ctx.makeImage() else { throw ExportError.render }
+        return image
+    }
+
+    static func solidMask(_ gray: CGFloat, width: Int, height: Int) throws -> CGImage {
+        let ctx = try BrushRaster.context(width: width, height: height, mask: true)
+        ctx.setFillColor(gray: gray, alpha: 1)
+        ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        guard let image = ctx.makeImage() else { throw ExportError.render }
+        return image
+    }
+}
+
 @MainActor struct AssistantTests {
     /// A 64x48 blue layer with a red block in it, and no selection.
     private func fixture() throws -> EditorSession {
@@ -49,28 +76,6 @@ final class RequestRecorder: @unchecked Sendable {
         let image = try #require(ctx.makeImage())
         s.insert(ImportedImage(image: image, thumbnail: image, name: "Object"))
         return s
-    }
-
-    /// Takes the optional straight from the request, so the stub closures need no `#require`.
-    nonisolated private func inverted(_ image: CGImage?) throws -> CGImage {
-        guard let image else { throw AssistantError.noTarget }
-        return try PixelAdjust.render(CIImage(cgImage: image).applyingFilter("CIColorInvert"),
-                                      width: image.width, height: image.height, isMask: false)
-    }
-
-    /// A solid RGBA image of one color, at any size the caller likes.
-    nonisolated private func solid(_ gray: CGFloat, width: Int, height: Int) throws -> CGImage {
-        let ctx = try BrushRaster.context(width: width, height: height, mask: false)
-        ctx.setFillColor(CGColor(srgbRed: gray, green: gray, blue: gray, alpha: 1))
-        ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
-        return try #require(ctx.makeImage())
-    }
-
-    nonisolated private func solidMask(_ gray: CGFloat, width: Int, height: Int) throws -> CGImage {
-        let ctx = try BrushRaster.context(width: width, height: height, mask: true)
-        ctx.setFillColor(gray: gray, alpha: 1)
-        ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
-        return try #require(ctx.makeImage())
     }
 
     /// Sends a prompt and waits for the whole round trip.
@@ -98,7 +103,7 @@ final class RequestRecorder: @unchecked Sendable {
         let s = try fixture()
         let original = try #require(s.activeLayer?.asset?.image)
         s.assistantBackend = StubAssistantBackend { request in
-            AssistantResult(output: .pixels(try self.inverted(request.image)), note: "Inverted it.")
+            AssistantResult(output: .pixels(try TestRasters.inverted(request.image)), note: "Inverted it.")
         }
         let undoCount = s.history.undoCount
         let conversation = try await send(s, "invert the colors")
@@ -121,7 +126,7 @@ final class RequestRecorder: @unchecked Sendable {
         let recorder = RequestRecorder()
         s.assistantBackend = StubAssistantBackend { request in
             recorder.record(request)
-            return AssistantResult(output: .pixels(try self.inverted(request.image)), note: "Done.")
+            return AssistantResult(output: .pixels(try TestRasters.inverted(request.image)), note: "Done.")
         }
         _ = try await send(s, "make it warmer")
         let request = try #require(recorder.seen)
@@ -137,7 +142,7 @@ final class RequestRecorder: @unchecked Sendable {
         let s = try fixture()
         // Half size, so the backend is exercising the resolution-agnostic path.
         s.assistantBackend = StubAssistantBackend { _ in
-            AssistantResult(output: .pixels(try self.solid(0.5, width: 32, height: 24)), note: "Done.")
+            AssistantResult(output: .pixels(try TestRasters.solid(0.5, width: 32, height: 24)), note: "Done.")
         }
         _ = try await send(s, "flatten it")
         let result = try #require(s.activeLayer?.asset?.image)
@@ -148,7 +153,7 @@ final class RequestRecorder: @unchecked Sendable {
     }
 
     @Test func aResultBeyondThePixelBudgetIsRefused() throws {
-        let tiny = try solid(0.5, width: 2, height: 2)
+        let tiny = try TestRasters.solid(0.5, width: 2, height: 2)
         #expect(throws: AssistantError.tooLarge) {
             _ = try AssistantPixels.normalized(tiny, width: 20_000, height: 20_000, isMask: false)
         }
@@ -161,7 +166,7 @@ final class RequestRecorder: @unchecked Sendable {
         s.applySelection(CGPath(rect: CGRect(x: 20, y: 16, width: 12, height: 10), transform: nil),
                          mode: .replace, name: "Select")
         s.assistantBackend = StubAssistantBackend { _ in
-            AssistantResult(output: .pixels(try self.solid(0, width: 64, height: 48)), note: "Blacked it out.")
+            AssistantResult(output: .pixels(try TestRasters.solid(0, width: 64, height: 48)), note: "Blacked it out.")
         }
         _ = try await send(s, "black it out")
         let read = try pixels(of: try #require(s.activeLayer?.asset?.image))
@@ -182,7 +187,7 @@ final class RequestRecorder: @unchecked Sendable {
         let recorder = RequestRecorder()
         s.assistantBackend = StubAssistantBackend { request in
             recorder.record(request)
-            return AssistantResult(output: .mask(try self.solidMask(0, width: 64, height: 48)), note: "Hid it.")
+            return AssistantResult(output: .mask(try TestRasters.solidMask(0, width: 64, height: 48)), note: "Hid it.")
         }
         let undoCount = s.history.undoCount
         let conversation = try await send(s, "hide the layer")
@@ -204,7 +209,7 @@ final class RequestRecorder: @unchecked Sendable {
         s.isMaskSelected = true
         let originalPixels = try #require(s.activeLayer?.asset?.image)
         s.assistantBackend = StubAssistantBackend { _ in
-            AssistantResult(output: .pixels(try self.solid(0, width: 64, height: 48)), note: "Wrong target.")
+            AssistantResult(output: .pixels(try TestRasters.solid(0, width: 64, height: 48)), note: "Wrong target.")
         }
         let undoCount = s.history.undoCount
         let conversation = try await send(s, "black it out")
@@ -263,7 +268,7 @@ final class RequestRecorder: @unchecked Sendable {
         effects.shadow = ShadowEffect()
         s.document?.layers[0].effects = effects
         s.assistantBackend = StubAssistantBackend { request in
-            AssistantResult(output: .pixels(try self.inverted(request.image)), note: "Done.")
+            AssistantResult(output: .pixels(try TestRasters.inverted(request.image)), note: "Done.")
         }
         _ = try await send(s, "invert it")
         #expect(s.activeLayer?.effects == effects,
