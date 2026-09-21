@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  # Branches are covered by `pull_request`. Triggering on their pushes as well would build
+  # every commit twice, since a push and a pull_request event cannot share a concurrency
+  # group. Use the manual run for a branch that has no pull request yet.
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The unit test bundle is app-hosted, so the host app has to be signed with
+  # something. Ad-hoc signing needs no certificate and no team.
+  SIGNING: >-
+    CODE_SIGN_IDENTITY=-
+    CODE_SIGN_STYLE=Manual
+    DEVELOPMENT_TEAM=
+    CODE_SIGNING_REQUIRED=NO
+    CODE_SIGNING_ALLOWED=YES
+
+jobs:
+  build:
+    name: Build and test (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          sw_vers
+          ls -d /Applications/Xcode*.app 2>/dev/null || true
+          xcodebuild -version
+          xcodebuild -showsdks | grep -i macos || true
+
+      # The app targets macOS 26.5, so pick the newest Xcode the runner has
+      # rather than whatever xcode-select happens to point at.
+      - name: Select newest Xcode
+        run: |
+          newest=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -n 1)
+          if [ -n "$newest" ]; then
+            sudo xcode-select -s "$newest/Contents/Developer"
+          fi
+          xcodebuild -version
+
+      - name: Resolve package dependencies
+        run: |
+          xcodebuild -resolvePackageDependencies \
+            -project Compositor.xcodeproj \
+            -scheme Compositor
+
+      - name: Build
+        run: |
+          set -o pipefail
+          xcodebuild build-for-testing \
+            -project Compositor.xcodeproj \
+            -scheme Compositor \
+            -configuration Debug \
+            -destination 'platform=macOS,arch=arm64' \
+            -derivedDataPath .build/DerivedData \
+            ${{ env.SIGNING }}
+
+      - name: Test
+        run: |
+          set -o pipefail
+          xcodebuild test-without-building \
+            -project Compositor.xcodeproj \
+            -scheme Compositor \
+            -configuration Debug \
+            -destination 'platform=macOS,arch=arm64' \
+            -derivedDataPath .build/DerivedData \
+            -only-testing:CompositorTests \
+            ${{ env.SIGNING }}
+
+      - name: Upload test results
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcresult
+          path: .build/DerivedData/Logs/Test
+          if-no-files-found: ignore
