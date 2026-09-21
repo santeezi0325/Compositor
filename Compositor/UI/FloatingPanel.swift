@@ -10,12 +10,16 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
     private static var positions: [String: NSPoint] = [:]
     let identifier: NSUserInterfaceItemIdentifier
     private let name: String
+    /// Tool dialogs get out of the way when the app loses focus. A panel holding a
+    /// conversation does not: it would take the transcript with it.
+    private let hidesOnDeactivate: Bool
     var onClose: (() -> Void)?
     private var panel: NSPanel?
     private var dismissing = false
 
-    init(name: String) {
+    init(name: String, hidesOnDeactivate: Bool = true) {
         self.name = name
+        self.hidesOnDeactivate = hidesOnDeactivate
         identifier = NSUserInterfaceItemIdentifier(name)
     }
 
@@ -61,7 +65,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         let panel = NSPanel(contentRect: .zero, styleMask: [.titled, .closable], backing: .buffered, defer: false)
         panel.identifier = identifier
         panel.isFloatingPanel = true
-        panel.hidesOnDeactivate = true
+        panel.hidesOnDeactivate = hidesOnDeactivate
         panel.isReleasedWhenClosed = false
         panel.delegate = self
         self.panel = panel

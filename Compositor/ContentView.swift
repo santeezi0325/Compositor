@@ -255,6 +255,7 @@ struct ContentView: View {
             set: { if !$0 { session.cropError = nil } })) {
                 Button("OK") { session.cropError = nil }
             } message: { Text(session.cropError ?? "") }
+        .modifier(AssistantPanel(session: session))
     }
     private func requestNewCanvas() {
         if let applicationDelegate { Task { await applicationDelegate.projects.newCanvas() } }
@@ -436,6 +437,24 @@ extension View {
                 active ? stepper.listen(step: step) : stepper.stopListening()
             }
             .onDisappear { stepper.stopListening() }
+    }
+}
+
+/// The AI assistant's panel. Out of the body for the reason `WidthReader` gives, and because the panel outlives
+/// any one of the editor's sheets: the assistant is a conversation, not a one-shot dialog, so it stays put when
+/// the app loses focus instead of vanishing the way the tool dialogs do.
+private struct AssistantPanel: ViewModifier {
+    let session: EditorSession
+    @State private var panel = FloatingPanelController(name: "assistantPanel", hidesOnDeactivate: false)
+
+    func body(content: Content) -> some View {
+        content.onChange(of: session.assistant == nil) { _, closed in
+            if closed { panel.close() }
+            else {
+                panel.onClose = { session.closeAssistant() }
+                panel.show(title: "AI Assistant", content: AssistantSheet(session: session))
+            }
+        }
     }
 }
 
