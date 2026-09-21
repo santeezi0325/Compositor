@@ -5,15 +5,21 @@ import Testing
 @MainActor
 struct DistortTests {
     private let shape = [CGPoint(x: 10, y: 10), CGPoint(x: 60, y: 10), CGPoint(x: 30, y: 30), CGPoint(x: 10, y: 30)]
+    /// `shape` with its second and third corners swapped, so the outline crosses itself: a bow-tie.
+    private var folded: [CGPoint] { [shape[0], shape[2], shape[1], shape[3]] }
 
-    @Test func perspectiveMappingHitsTheCornersAndTwistedShapesAreRefused() {
+    @Test func perspectiveMappingHitsTheCornersAndCollapsedShapesAreRefused() {
         let map = DistortWarp.homography(shape)
         for (unit, corner) in zip([CGPoint(x: 0, y: 0), CGPoint(x: 1, y: 0), CGPoint(x: 1, y: 1), CGPoint(x: 0, y: 1)], shape) {
             let mapped = map(unit)
             #expect(abs(mapped.x - corner.x) < 1e-6 && abs(mapped.y - corner.y) < 1e-6, "\(unit) went to \(mapped)")
         }
         #expect(DistortWarp.isUsable(shape))
-        #expect(!DistortWarp.isUsable([shape[0], shape[2], shape[1], shape[3]]))           // bow-tie
+        // A folded shape is usable as of 1.1: it has no perspective that takes the image to it, so `warp` takes
+        // each half there on its own, as two triangles meeting along the diagonal. `isConvex` is what still
+        // tells the two apart and picks the perspective path. This asserted `isUsable` refused a bow-tie, from
+        // when a fold had no warp at all. A collapsed corner is still refused: one half has nothing to draw.
+        #expect(DistortWarp.isUsable(folded) && !DistortWarp.isConvex(folded))             // bow-tie
         #expect(!DistortWarp.isUsable([shape[0], shape[0], shape[2], shape[3]]))           // collapsed corner
     }
 
@@ -31,8 +37,10 @@ struct DistortTests {
         session.beginTransform(persistent: false)
         session.beginDistort()
         #expect(session.transformEdit?.corners?.count == 4 && session.transformEdit?.persistent == true)
-        session.previewCorners([shape[0], shape[2], shape[1], shape[3]]) // twisted: ignored
+        session.previewCorners([shape[0], shape[0], shape[2], shape[3]]) // collapsed: refused, corners untouched
         #expect(session.transformEdit?.corners?[1] == CGPoint(x: 30, y: 10))
+        session.previewCorners(folded) // folded: taken now, and drawn as two triangles
+        #expect(session.transformEdit?.corners?[1] == CGPoint(x: 30, y: 30))
         session.previewCorners(shape)
         let count = session.history.undoCount
         session.commitTransform()
