@@ -194,3 +194,28 @@ The shape it would take here is a second planner operation — one that says "ha
 layer to the generative backend with this prompt" — plus a `GenerativeBackend` behind it. The
 `AssistantBackend` protocol does not need to change to accommodate it, which was the point of
 keeping it neutral.
+
+### What the sandbox allows, whichever model it is
+
+`Config/Compositor.entitlements` decides more about this than the model does. The app declares
+`com.apple.security.app-sandbox`, `com.apple.security.network.client`,
+`com.apple.security.files.user-selected.read-write`, and a mach-lookup exception for Sparkle's
+two helpers. Nothing else — in particular **no `network.server`**, so the app cannot listen on
+a port, and no entitlement that would let it read arbitrary places on disk.
+
+That maps onto the three shapes a model can arrive in:
+
+| Shape | Works today? | What it costs |
+|---|---|---|
+| A Swift package linked into the app | Yes | Weights live in the app's own container, which needs no entitlement; downloading them uses `network.client`. Cleanest, but we own the download UX and the disk. |
+| A helper binary we ship | Probably, with work | It has to live inside the app bundle and it inherits the sandbox; signing and notarizing a second executable is real work. The app cannot run a binary the *user* installed — that is outside what it may read and execute. |
+| A local server on `localhost` | **Yes, with no change at all** | `network.client` already covers connecting out, including to a loopback port. Costs nothing in entitlements, weights or bundle size. The price is that the app depends on something the user installed and started. |
+
+The third row is the surprising one and worth knowing before picking: if a model already runs
+as a local HTTP server, reaching it needs nothing from this app that is not already there.
+
+`network.client` would equally allow a *remote* API, but that runs into a different wall: the
+app has no secrets mechanism anywhere, so there is nowhere to put a key.
+
+Not verified here: exactly what a sandboxed app may `posix_spawn`. The entitlements above are
+read from the file; the spawn rules are from Apple's sandbox model and were not tested on a Mac.
