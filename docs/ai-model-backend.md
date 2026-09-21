@@ -88,8 +88,18 @@ its task is cancelled. All need a Mac.
 
 This is why the planning half is worth shipping on its own. Core Image has around 180
 documented built-in filters, deterministic and at full resolution, and Vision adds on-device
-subject masking — all with **zero added bundle size, no entitlement and no availability gate**
-on macOS 26.
+subject masking — all with **zero added bundle size and no entitlement** on macOS 26.
+
+One hedge on "no gate", because it was overstated on the first pass. There is no *entitlement*
+gate and no Apple Intelligence gate, but `VNGenerateForegroundInstanceMaskRequest` is reported
+on [Apple's developer forums](https://developer.apple.com/forums/thread/764948) not to run on
+the CPU — forcing a CPU compute device fails with "unsupported compute device", and the symptom
+is "Could not create inference context". That is a hardware gate with the same practical effect,
+and it leaves two things open that nothing in this branch answers: whether Remove Background
+works on a headless CI runner, and how it behaves on an Intel Mac, which macOS 26 still
+supports. **No test in this branch runs Vision** — the assistant tests check that the planner
+emits `.removeBackground`, never that the filter executes. So CI proves this file compiles, not
+that the subject mask works there.
 
 Together that genuinely covers "warm it up a bit", "remove the background", "feather the mask
 six pixels", "straighten this". What it cannot do is anything needing new image content, and —
@@ -98,11 +108,20 @@ has no class-labelled segmentation beyond person and unlabelled foreground insta
 "select the red car" and "select the sky" are out for the same reason "paint a new sky" is.
 
 One precise detail worth knowing, because it bears directly on the full-resolution question:
-Vision's raw `instanceMask` is a **fixed 512×512 grid** whatever the input size, while
-`generateScaledMask(for:scaledToImageFrom:)` returns a mask at the input's own resolution. The
-app already uses both — `SubjectRemoval.swift:35` takes the scaled one, `ObjectSelection.swift:46`
-takes the low-resolution one and upsamples. Remove Background through the assistant is the
-scaled path, so it really is full resolution.
+Vision's two mask outputs are not the same resolution. `generateScaledMask(for:scaledToImageFrom:)`
+returns a mask at the input's own size; the raw `instanceMask` is a coarse label buffer that the
+app has to upsample. This repository already uses both — `SubjectRemoval.swift:35` takes the
+scaled one, `ObjectSelection.swift:46` reads the raw one — and **Remove Background through the
+assistant is the scaled path, so it really is full resolution**, which is the part that matters
+here.
+
+An earlier draft of this page said the raw buffer is "a fixed 512×512 grid whatever the input
+size". Dropped, because the evidence does not carry it: the one measurement behind that figure
+covers two roughly 2-megapixel inputs and generalises from them, and WWDC23 session 10176 says
+the subject request "produces a soft segmentation mask at the same resolution", which at least
+complicates it. The app makes no such assumption either — `ObjectSelection.instanceIndex` reads
+`CVPixelBufferGetWidth`/`Height` at runtime (`ObjectSelection.swift:54-55`) rather than hard-coding
+a size. Whatever the number is, the shape of the argument is unchanged.
 
 macOS 27 adds click-and-scribble-to-segment
 ([`GenerateIterativeSegmentationRequest`](https://developer.apple.com/documentation/vision/generateiterativesegmentationrequest)),
@@ -223,9 +242,19 @@ layer, and run Compositor's own full-resolution operation through it.
 already precisely this pattern, written for a different reason: it runs the expensive filter on
 a copy no larger than `limit`, scales the radius by the same factor, and draws back up, letting
 the full-resolution guide supply the fine detail. A generative backend can reuse it as it
-stands. Use it rather than Core Image's own joint upsample — the comment at
-`GuidedMatte.swift:3–5` records that `CIGuidedFilter` "does nothing on this system and its
-edge-preserving upsample barely moves the mask", which is why this file exists.
+stands.
+
+Prefer it over Core Image's own joint upsample, but for the reason the code gives rather than
+the one the comment gives. `GuidedMatte.swift:3–5` says `CIGuidedFilter` "does nothing on this
+system and its edge-preserving upsample barely moves the mask" — which runs two filters
+together: `CIGuidedFilter` is not a documented public Core Image filter at all, so that half is
+unsurprising rather than a platform finding, and `CIEdgePreserveUpsampleFilter` *is* documented
+and *is* used in this app, at `ObjectSelection.swift:68`. The real argument is what each call
+site does with its result. `ObjectSelection` reaches for the Core Image filter defensively
+(`if let filter … else { refined = coarse }`) and then thresholds the output to pure black and
+white at `:80`, so nothing subtle survives the trip. `SubjectRemoval` wants a soft matte that
+keeps hair, and for that it uses `GuidedMatte.refine` (`SubjectRemoval.swift:51`). A mask being
+lifted to full resolution is the second case.
 
 **Class 3 — the edit invents content.** Inpainting, object removal, adding or replacing things,
 restyling. Here there is no lossless path and no amount of cleverness makes one. The honest
