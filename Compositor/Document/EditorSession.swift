@@ -246,6 +246,12 @@ final class EditorSession {
     var hueSaturation: HueSaturationEdit?
     /// The open filter (Filter menu), and the settings the next one starts from.
     var filterEdit: FilterEdit?
+    /// The AI assistant's conversation, non-nil while its panel is open. It sits here rather
+    /// than in the view because `ProjectTabs` rebuilds `ContentView` per tab.
+    var assistant: AssistantConversation?
+    /// The model behind the assistant. Swapping this is the whole point of `AssistantBackend`;
+    /// the placeholder proves the loop with no network and no weights.
+    @ObservationIgnored var assistantBackend: any AssistantBackend = PlaceholderAssistantBackend()
     var filterSettings = FilterSettings()
     @ObservationIgnored var hueSaturationTask: Task<Void, Never>?
     /// The newest preview request while one is already rendering.

@@ -183,6 +183,9 @@ struct CompositorApp: App {
                         .disabled(session.selection == nil || !session.canEditPixels)
                     Button("Content-Aware Fill…") { session.beginFilter(.contentAwareFill) }
                         .configuredKeyboardShortcut(.delete, modifiers: .shift).disabled(!session.canContentAwareFill)
+                    Button("AI Assistant…") { session.openAssistant() }
+                        .configuredKeyboardShortcut("k", modifiers: [.command, .shift])
+                        .disabled(session.document == nil)
                 }
                 CommandMenu("Select") {
                     // Text fields keep their own Select All.
