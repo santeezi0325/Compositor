@@ -72,6 +72,19 @@ nonisolated enum TestRasters {
         return image
     }
 
+    /// A left-to-right black-to-white ramp: a histogram that already spans the full range, so
+    /// an automatic levels pass has nothing to correct.
+    static func ramp(width: Int, height: Int) throws -> CGImage {
+        let context = try BrushRaster.context(width: width, height: height, mask: false)
+        for x in 0..<width {
+            let level = CGFloat(x) / CGFloat(max(1, width - 1))
+            context.setFillColor(red: level, green: level, blue: level, alpha: 1)
+            context.fill(CGRect(x: x, y: 0, width: 1, height: height))
+        }
+        guard let image = context.makeImage() else { throw ExportError.render }
+        return image
+    }
+
     static func solidMask(_ gray: CGFloat, width: Int, height: Int) throws -> CGImage {
         let ctx = try BrushRaster.context(width: width, height: height, mask: true)
         ctx.setFillColor(gray: gray, alpha: 1)

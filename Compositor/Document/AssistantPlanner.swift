@@ -161,6 +161,22 @@ nonisolated struct KeywordAssistantPlanner: AssistantPlanner {
             Match(step: .filter(kind, settings), note: note)
         }
 
+        // "Fix the lighting" first, because it has to beat the "lighting"/"exposure" words
+        // below. A request that names no direction is a request to measure: this planner has
+        // never seen the picture either, and a fixed nudge on a good exposure only spoils it.
+        if has(["fix the light", "fix lighting", "fix the expos", "fix the contrast", "fix the tone",
+                "auto level", "auto-level", "autolevel", "auto tone", "auto contrast",
+                "improve the light", "improve the expos", "correct the expos", "balance the tone"]) {
+            return Match(step: .autoLevels(.contrast),
+                         note: "Set the black and white points from the layer's own histogram.")
+        }
+        if has(["fix the color", "fix the colour", "auto color", "auto colour", "auto-color",
+                "color cast", "colour cast", "fix the white balance", "correct the color",
+                "correct the colour", "neutralize the", "neutralise the"]) {
+            return Match(step: .autoLevels(.neutral),
+                         note: "Corrected each channel and the midtones from the layer's own histogram.")
+        }
+
         // Exposure in stops is read before "brighter" and "darker" so that a clause naming a
         // number of stops gets the real Exposure adjustment rather than a flat brightness shift.
         if has(["stop", "exposure"]) {

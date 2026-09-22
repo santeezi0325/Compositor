@@ -61,6 +61,41 @@ struct AssistantPlanTests {
 
     // MARK: Reading an instruction
 
+    @Test func fixTheLightingMeasuresRatherThanGuesses() async throws {
+        // J's first real run: "fix the cropping and lighting" shoved a fixed brightness lift at
+        // a photo nobody had looked at, and it came out worse. A request that names no direction
+        // has to read the image instead.
+        let plan = try await KeywordAssistantPlanner().plan("fix the lighting", for: .layer, history: [])
+        #expect(plan.steps == [.autoLevels(.contrast)])
+    }
+
+    @Test func fixTheColoursCorrectsEachChannel() async throws {
+        let plan = try await KeywordAssistantPlanner().plan("fix the colour cast", for: .layer, history: [])
+        #expect(plan.steps == [.autoLevels(.neutral)])
+    }
+
+    @Test func namingADirectionStillGetsTheDirectNudge() async throws {
+        // The measuring path must not swallow an instruction that did say which way to go.
+        let plan = try await KeywordAssistantPlanner().plan("brighter", for: .layer, history: [])
+        #expect(plan.steps.count == 1)
+        #expect(try color(plan).brightness > 0)
+    }
+
+    @Test func autoLevelsIsRefusedOnAMask() {
+        // Levels builds RGBA contexts, so a mask target is the same trap the filters are.
+        #expect(throws: AssistantPlanError.notForMask("Auto Levels")) {
+            try AssistantStep.autoLevels(.contrast).validate(targetIsMask: true, hasSelection: false)
+        }
+    }
+
+    @Test func aLayerAlreadyUsingItsFullRangeIsLeftAlone() async throws {
+        // A black-to-white ramp has nothing to correct, and saying "done" would be a lie.
+        let ramp = try TestRasters.ramp(width: 256, height: 8)
+        await #expect(throws: AssistantPlanError.alreadyBalanced) {
+            try await run(AssistantPlan(steps: [.autoLevels(.contrast)], note: ""), on: ramp)
+        }
+    }
+
     @Test func oneInstructionCanAskForSeveralChanges() async throws {
         let plan = try await KeywordAssistantPlanner().plan("warm it up and take the color out",
                                                             for: .layer, history: [])

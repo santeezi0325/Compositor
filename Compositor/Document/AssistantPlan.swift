@@ -57,6 +57,12 @@ nonisolated enum AssistantStep: Equatable, Sendable {
     case color(ColorChange)
     /// The operations a layer mask can take.
     case mask(MaskChange)
+    /// Black and white points read from the layer's own histogram, the same code the Levels
+    /// sheet's Auto buttons run. The only step here that looks at the image before deciding what
+    /// to do, which is why a vague "fix the lighting" maps to it rather than to a fixed nudge:
+    /// the model has never seen the picture, so a blind +0.15 brightness on an already-good
+    /// exposure is just damage.
+    case autoLevels(LevelsAuto)
 
     /// The step named the way the user would name it, for the note and for error messages.
     var name: String {
@@ -64,6 +70,7 @@ nonisolated enum AssistantStep: Equatable, Sendable {
         case .filter(let kind, _): kind.rawValue
         case .color: "Color"
         case .mask: "Mask"
+        case .autoLevels: "Auto Levels"
         }
     }
 
@@ -80,6 +87,9 @@ nonisolated enum AssistantStep: Equatable, Sendable {
             guard !targetIsMask else { throw AssistantPlanError.notForMask(name) }
         case .mask:
             guard targetIsMask else { throw AssistantPlanError.onlyForMask }
+        case .autoLevels:
+            // Levels builds RGBA contexts like the filters do, so a mask target is the same trap.
+            guard !targetIsMask else { throw AssistantPlanError.notForMask(name) }
         }
     }
 }
@@ -90,6 +100,7 @@ nonisolated enum AssistantPlanError: LocalizedError, Equatable {
     case onlyForMask
     case needsSelection(String)
     case emptyStep
+    case alreadyBalanced
 
     var errorDescription: String? {
         switch self {
@@ -106,6 +117,9 @@ nonisolated enum AssistantPlanError: LocalizedError, Equatable {
             "That only applies to a layer mask, and the layer's pixels are selected."
         case .emptyStep:
             "The assistant produced a step that would not change anything."
+        case .alreadyBalanced:
+            "There was nothing for an automatic levels pass to correct here — this layer's "
+                + "tones already run the whole way from black to white."
         }
     }
 }
@@ -324,6 +338,19 @@ nonisolated enum AssistantPlanRunner {
             let changed = change.apply(to: CIImage(cgImage: image))
             return try PixelAdjust.render(changed.cropped(to: CGRect(x: 0, y: 0, width: image.width, height: image.height)),
                                           width: image.width, height: image.height, isMask: true)
+        case .autoLevels(let mode):
+            // Measure, then decide. The selection is passed to both halves so that "fix the
+            // lighting" inside a selection reads its histogram from the selected pixels rather
+            // than from the whole layer, which is what the Levels sheet does too.
+            let measuring = LevelsJob(image: image, settings: LevelsSettings(),
+                                      selection: selection, mapping: pixelToDocument)
+            let settings = mode.settings(histogram: try LevelsFilter.histogram(measuring))
+            // An image already using its full range produces identity settings, and `run`
+            // returns the source untouched. That is the right answer, not a failure — but an
+            // empty plan would claim an edit that did not happen, so say so.
+            guard !settings.isIdentity else { throw AssistantPlanError.alreadyBalanced }
+            return try LevelsFilter.run(LevelsJob(image: image, settings: settings,
+                                                  selection: selection, mapping: pixelToDocument))
         }
     }
 }

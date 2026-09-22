@@ -96,12 +96,24 @@ nonisolated struct FoundationModelsAssistantPlanner: AssistantPlanner {
         matte inwards. Never use any other operation.
         """ : """
 
-        The layer's PIXELS are selected. Available operations: brightness, contrast, \
-        saturation, temperature (positive is warmer), tint, sharpen, vignette, invert, blur, \
-        motionBlur, grain, noise, exposure, sepiaTone, lensCorrection, removeBackground, \
-        fillSelection. removeBackground cuts the subject out of its background. fillSelection \
-        is content-aware fill and only works when the user has something selected. Never use a \
-        mask operation.
+        The layer's PIXELS are selected. Available operations: autoLevels, autoColor, \
+        brightness, contrast, saturation, temperature (positive is warmer), tint, sharpen, \
+        vignette, invert, blur, motionBlur, grain, noise, exposure, sepiaTone, lensCorrection, \
+        removeBackground, fillSelection. removeBackground cuts the subject out of its \
+        background. fillSelection is content-aware fill and only works when the user has \
+        something selected. Never use a mask operation.
+
+        READ THIS BEFORE CHOOSING. You have never seen this picture. You do not know whether it \
+        is dark, bright, flat or already good. So when the user asks you to FIX or IMPROVE or \
+        CORRECT the lighting, exposure, contrast or tone, without saying which way to go, use \
+        autoLevels — it measures the picture's own histogram and sets the black and white \
+        points from it, and it leaves a picture that is already correct alone. Use autoColor \
+        the same way for a colour cast or "fix the colours". Both ignore amount.
+
+        Only use brightness, contrast, exposure, temperature and the rest when the user tells \
+        you which DIRECTION to go — "brighter", "less contrast", "warmer", "two stops down". \
+        Guessing a fixed nudge for a vague "make it look better" is how you make a good photo \
+        worse.
         """
         return common + vocabulary
     }
@@ -154,7 +166,7 @@ nonisolated struct ModelStep {
 nonisolated enum ModelOperation {
     case brightness, contrast, saturation, temperature, tint, sharpen, vignette, invert
     case blur, motionBlur, grain, noise, exposure, sepiaTone, lensCorrection
-    case removeBackground, fillSelection
+    case removeBackground, fillSelection, autoLevels, autoColor
     case maskInvert, maskFeather, maskSpread, maskContrast
 }
 
@@ -280,6 +292,13 @@ extension ModelStep {
             return .filter(.removeBackground, FilterSettings(backgroundQuality: abs(strength) > 0.7 ? .advanced : .basic))
         case .fillSelection:
             return .filter(.contentAwareFill, FilterSettings())
+        // These two ignore `amount` on purpose: the image decides, not the model, which has
+        // never seen it. `contrast` holds the channels together so the colours do not shift;
+        // `neutral` corrects each channel and the midtones, which is what fixes a cast.
+        case .autoLevels:
+            return .autoLevels(.contrast)
+        case .autoColor:
+            return .autoLevels(.neutral)
         default:
             return nil
         }
