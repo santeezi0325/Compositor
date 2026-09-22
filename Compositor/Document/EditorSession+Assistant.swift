@@ -104,7 +104,11 @@ extension EditorSession {
         let startImage = layer.asset?.image
         let startMaskImage = layer.mask?.asset.image
         let startTransform = layer.transform
-        let history = conversation.turns
+        // Everything before this instruction. `submitAssistant` already appended it as the last
+        // turn so the panel can show it while the model works, and the planner is handed it
+        // separately — without the drop it arrives twice in a row and reads as the user having
+        // said the same thing to themselves.
+        let history = Array(conversation.turns.dropLast())
         let backend = assistantBackend
         do {
             // A uniform 1x1 mask carries no shape for a model to read and cannot hold a partial
@@ -123,7 +127,8 @@ extension EditorSession {
             // never be carried across a suspension.
             let clip = try selection?.clip(canvas: document.size)
             let request = AssistantRequest(image: source, targetIsMask: targetIsMask,
-                                           instruction: instruction, canvasSize: document.size)
+                                           instruction: instruction, canvasSize: document.size,
+                                           selection: clip, pixelToDocument: mapping)
             // Awaited in this task. `isProjectBusy` is deliberately *not* held across this leg:
             // a model can take seconds and the editor has to stay usable. The price is that the
             // document may change underneath, which the guard further down catches.

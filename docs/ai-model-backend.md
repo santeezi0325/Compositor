@@ -1,0 +1,532 @@
+# The model behind the assistant
+
+What actually runs on a Mac, what this branch builds, and what is still missing.
+
+Written 21 September 2026 against macOS 26.5 (the app's deployment target) and Xcode 26.6
+(what CI actually built with — the compiler line in
+[run 35648372564](https://github.com/santeezi0325/Compositor/actions/runs/35648372564) reads
+`-sdk …/MacOSX26.5.sdk -target arm64-apple-macos26.5`). Everything below is either read from a
+primary source, with the link, or read from this repository, with the file. Where something
+could not be checked it says so: these containers are Linux with no Xcode and no Apple silicon,
+so nothing here was measured on a Mac.
+
+**One date matters more than it looks.** macOS 27 and Xcode 27 went public on 14 September
+2026, a week before this was written
+([Apple developer releases](https://developer.apple.com/news/releases/): macOS 27.0 (26A428),
+Xcode 27 (27A266a)). So macOS 27 below is the *current* Mac release, not a future one, and the
+only reason this repository still builds against the 26.5 SDK is that the GitHub runner image
+has not picked up Xcode 27 yet. `ci.yml` selects the newest Xcode on the runner, deliberately —
+so the SDK will move on its own, with nobody changing a line.
+
+## The short version
+
+Split the assistant in two, because the two halves have completely different answers.
+
+**Understanding an instruction** is solved on device today. Apple's `SystemLanguageModel` ships
+with the OS, costs nothing to distribute, needs no API key, and with guided generation it emits
+a typed plan rather than prose to be parsed. This branch uses it.
+
+**Generating pixels** is not solved on device today, and Apple is not the answer. There is no
+public on-device image-editing model for a third-party Mac app, in any framework. The only
+headless generative image API Apple ever shipped has already been removed — that happened on
+the release that shipped last week — and its replacement is a modal sheet backed by a server
+model. Anything generative has to come from a third-party model, and the model worth having
+needs more memory than most Macs will give it.
+
+**Full resolution is three answers, not one.** The open edit models normalise their input to
+about a megapixel in their own code, so handing one a 24-megapixel layer and resampling what
+comes back is a 4.8× upscale the user will see. Colour work can avoid that entirely by fitting
+a transform from a low-resolution pair and evaluating it full size, and region work by taking
+the model's mask instead of its pixels. Only content synthesis genuinely needs new pixels at
+full size, and for that there is no lossless answer at all. Details below; the machinery for
+the first two is already in this repository.
+
+So: ship the understanding half now over the app's own full-resolution operations, which is
+most of the value and all of the reliability, and treat the generative half as a second
+project behind the same protocol — starting with a decision about whose hardware it runs on,
+because that one is not a detail.
+
+## What Apple gives us
+
+### `FoundationModels`: yes, for understanding
+
+[`SystemLanguageModel`](https://developer.apple.com/documentation/foundationmodels/systemlanguagemodel)
+is an on-device text model, macOS 26.0+. It is a *text* model: it never sees the layer. That is
+fine, because the job here is reading "warm it up a bit and take the edge off" and deciding
+which of the app's operations that means, not looking at pixels.
+
+- `@Generable` and `@Guide` make it emit a Swift type directly, so there is no prose to parse.
+  Generation is *constrained decoding*, which Apple says "fundamentally guarantees structural
+  correctness" (WWDC25 session 286) — a `@Generable` enum always comes back as one of its cases.
+  Structural validity is guaranteed; being *right* is not.
+  ([Generable](https://developer.apple.com/documentation/foundationmodels/generable))
+- **It is not one model, and an app cannot know which one it is talking to.** Apple's own page
+  says "there are 3 model versions", aligning with macOS 26.0–26.3, 26.4 and 27.0, and there is
+  a `variant` property to ask at runtime — with a whole documentation page called
+  [Updating prompts for new model
+  versions](https://developer.apple.com/documentation/foundationmodels/updating-prompts-for-new-model-versions).
+  The widely quoted figures (~3 billion parameters, 2-bit decoder weights, Apple advising
+  against arithmetic) describe the 2025 artifact, which is the *first* of those three; Apple
+  announced a rebuilt on-device generation in June 2026. Treat the published numbers as history
+  rather than a spec.
+
+  This is what shaped the plan type, and it is a better reason than "the model is small" was.
+  The model picks one operation and one strength between −1 and 1, and the app does every
+  conversion into pixels, stops and degrees. A narrow contract is what survives the model
+  underneath it changing three times in a year. Asking it to compute a blur radius would be
+  betting on a version.
+- Availability is a **runtime** condition, not a build-time one: the framework links against the
+  macOS 26 SDK regardless, and `SystemLanguageModel.default.availability` reports
+  `.available` or `.unavailable(.deviceNotEligible)` / `.unavailable(.modelNotReady)` and so on.
+  It needs Apple Intelligence switched on, on Apple silicon, in a supported language — so an
+  Intel Mac (macOS 26 is the last Intel release), a Mac with the toggle off, and a CI runner all
+  report unavailable. **The keyword planner is therefore not polish, it is the load-bearing
+  path** on that hardware and in CI.
+- **Verified by this branch's own CI**: `FoundationModelsAssistantPlanner.swift` compiles on a
+  GitHub Actions `macos-latest` runner, where Apple Intelligence is certainly not switched on.
+- Bundle cost is zero. The weights are a shared OS asset the user downloads by enabling Apple
+  Intelligence, so there is no download UX, no cache directory and no first-run wait that we own.
+
+Two things to know, and they are nearer than they read. On **macOS 27 — the release people are
+running now** — the model can be given an image: `Attachment`, `ImageAttachmentContent` and
+`ImageReference` are all 27.0+, so "make the sky moodier" could be informed by whether there is
+in fact a sky. It is a real option today rather than something to wait for. But an
+`if #available(macOS 27, *)` branch is not the whole guard: seeing images is a *model
+capability*, not just an OS symbol, so the check is that branch **and**
+`model.capabilities.contains(.vision)`. Dispatching without it throws rather than degrading,
+and with more than one on-device variant in play the answer is not predictable from the OS
+version.
+
+The second thing is error types, which do not survive the version bump cleanly.
+`LanguageModelSession.GenerationError` is bounded to 26.0–27.0 and does not become one
+replacement — it becomes several, including a separate `LanguageModelSession.Error` at 27.0+
+carrying `concurrentRequests` with no associated context, where the 26 case had one. A single
+`catch LanguageModelSession.GenerationError.concurrentRequests(let context)` written today
+simply will not match on 27. And availability in Swift is decided by the **SDK you compile
+against**, not by the deployment target: lowering the target does not keep a symbol the 27 SDK
+has dropped. This branch names none of these types, so it is unaffected; anything that does
+will break on the first build after the runner image takes Xcode 27, with no commit having
+changed.
+
+Not verified here: how good the model actually is at picking the right operation, its disk and
+RAM cost (Apple publishes neither), and whether `respond(to:generating:)` aborts inference when
+its task is cancelled. All need a Mac.
+
+### Vision and Core Image: the operations worth planning over
+
+This is why the planning half is worth shipping on its own. Core Image has around 180
+documented built-in filters, deterministic and at full resolution, and Vision adds on-device
+subject masking — all with **zero added bundle size and no entitlement** on macOS 26.
+
+One hedge on "no gate", because it was overstated on the first pass. There is no *entitlement*
+gate and no Apple Intelligence gate, but `VNGenerateForegroundInstanceMaskRequest` is reported
+on [Apple's developer forums](https://developer.apple.com/forums/thread/764948) not to run on
+the CPU — forcing a CPU compute device fails with "unsupported compute device", and the symptom
+is "Could not create inference context". That is a hardware gate with the same practical effect,
+and it leaves two things open that nothing in this branch answers: whether Remove Background
+works on a headless CI runner, and how it behaves on an Intel Mac, which macOS 26 still
+supports. **No test in this branch runs Vision** — the assistant tests check that the planner
+emits `.removeBackground`, never that the filter executes. So CI proves this file compiles, not
+that the subject mask works there.
+
+Together that genuinely covers "warm it up a bit", "remove the background", "feather the mask
+six pixels", "straighten this". What it cannot do is anything needing new image content, and —
+the limit people underestimate — **anything needing semantic selection**. Vision on macOS 26
+has no class-labelled segmentation beyond person and unlabelled foreground instances, so
+"select the red car" and "select the sky" are out for the same reason "paint a new sky" is.
+
+One precise detail worth knowing, because it bears directly on the full-resolution question:
+Vision's two mask outputs are not the same resolution. `generateScaledMask(for:scaledToImageFrom:)`
+returns a mask at the input's own size; the raw `instanceMask` is a coarse label buffer that the
+app has to upsample. This repository already uses both — `SubjectRemoval.swift:35` takes the
+scaled one, `ObjectSelection.swift:46` reads the raw one — and **Remove Background through the
+assistant is the scaled path, so it really is full resolution**, which is the part that matters
+here.
+
+An earlier draft of this page said the raw buffer is "a fixed 512×512 grid whatever the input
+size". Dropped, because the evidence does not carry it: the one measurement behind that figure
+covers two roughly 2-megapixel inputs and generalises from them, and WWDC23 session 10176 says
+the subject request "produces a soft segmentation mask at the same resolution", which at least
+complicates it. The app makes no such assumption either — `ObjectSelection.instanceIndex` reads
+`CVPixelBufferGetWidth`/`Height` at runtime (`ObjectSelection.swift:54-55`) rather than hard-coding
+a size. Whatever the number is, the shape of the argument is unchanged.
+
+macOS 27 adds click-and-scribble-to-segment
+([`GenerateIterativeSegmentationRequest`](https://developer.apple.com/documentation/vision/generateiterativesegmentationrequest)),
+which would be the natural way to reach "select that", and it is shipping now rather than
+pending. The catch is that it is the sole conforming type of Vision's
+`DownloadableAssetsRequest`: the app has to inspect `assetStatus` and call `downloadAssets()`
+before the request will run. So it is a 27-only API *and* a network-dependent one with its own
+progress UI to own — which breaks the deployment target and the no-weights story at once.
+`GenerateForegroundInstanceMaskRequest`, the one this branch actually uses, is macOS 15.0+ and
+carries no such conformance.
+
+### Generative pixels: no
+
+Exhaustively checked across ImagePlayground, Vision, Core Image, PhotoKit and PhotosUI.
+
+- **`ImageCreator` is gone, and that is past tense now.** Apple's [June 11 2026 developer
+  news](https://developer.apple.com/news/?id=dz9wvq0r): it "will no longer work in iOS 27,
+  iPadOS 27, macOS 27, and visionOS 27 or later", and on the public OSes "Your code won't
+  compile, and any features in your app that use ImageCreator won't work for people using your
+  app." macOS 27 shipped on 14 September. A backend built on it would not be facing a migration
+  — it would already be broken on the Macs people are using, and would stop building the moment
+  the CI runner takes Xcode 27. This is the single most important thing on this page, because
+  `ImageCreator` is the API you would reach for first.
+- **It could not have done the job anyway.** It is text-to-image, not image-to-image: an
+  existing picture goes in as `ImagePlaygroundConcept.image(_:)`, which WWDC26 session 375 calls
+  "a starting point, not a constraint". And on macOS 26 it is style-locked to animation,
+  illustration, sketch and emoji — [no photorealistic
+  style](https://developer.apple.com/documentation/imageplayground/imageplaygroundstyle).
+  For a photo compositor that alone is disqualifying.
+- **macOS 27 does add real instruction-driven editing** —
+  [`CreationStrategy.editExisting`](https://developer.apple.com/documentation/imageplayground/imageplaygroundoptions/creationstrategy-swift.enum/editexisting),
+  which "tries to preserve as much of the original image as possible" — and real photorealism.
+  But it is reachable only through the system's own modal sheet, it runs on **Private Cloud
+  Compute rather than on device**, and it is metered against the user's iCloud+ plan. That is a
+  different shape from `AssistantBackend` in every respect, and it is not on-device inference.
+  Worth separating two things here, because they get conflated: the *strategy* is 27.0+, but the
+  sheet that carries it is not new at all —
+  [`ImagePlaygroundViewController`](https://developer.apple.com/documentation/imageplayground/imageplaygroundviewcontroller),
+  `imagePlaygroundSheet`, `sourceImage` and `supportsImagePlayground` are all **macOS 15.1+**, a
+  full version below this app's floor. So "Generate with Image Playground…" as an explicit menu
+  item, handing the user off to Apple's sheet, is shippable today. It is just not a backend.
+- **Photos' "Clean Up" has no public API** in any framework. It is a Photos-app feature.
+- **Vision is analytic.** Its requests produce masks and regions, never pixels.
+- **Core Image's "generators" are procedural** — checkerboards, stripes, QR codes. Nothing
+  diffusion-shaped, nothing that inpaints.
+
+## What this branch builds
+
+Two halves that meet only at `AssistantPlan`, a short list of typed, clamped steps.
+
+```
+instruction ──▶ AssistantPlanner ──▶ AssistantPlan ──▶ AssistantPlanRunner ──▶ CGImage
+                (needs a model)      (typed, clamped)   (no model at all)
+```
+
+**Planners**, tried in order, first one that is ready and produces a plan wins:
+
+| | `FoundationModelsAssistantPlanner` | `KeywordAssistantPlanner` |
+|---|---|---|
+| Ready when | Apple Intelligence is on and eligible | always |
+| Understands | instructions in the user's own words | about a hundred phrasings |
+| Multi-step | yes | yes, one clause at a time |
+| Deterministic | no | yes, which is why the tests use it |
+
+A planner that fails falls through to the next, so a declined instruction costs vocabulary
+rather than the whole assistant. Cancellation is the one error never swallowed — falling
+through on a cancel would re-run the instruction the user just stopped.
+
+**The runner** has no model in it. Each step runs at the layer's full resolution:
+
+- `.filter` goes through `PixelFilter.run` (`Compositor/Document/Filters.swift:121`), which is
+  the same call the Filter menu's own commit path makes at `Filters.swift:406`. That is ten
+  real operations including Vision's
+  subject mask (Remove Background) and Content-Aware Fill, already shipping and already tested.
+- `.color` is one Core Image chain for the colour work the menus have no entry for —
+  saturation, white balance, sharpening, vignette, invert.
+- `.mask` is the short list that means anything to an 8-bit matte: invert, feather,
+  spread/choke, contrast.
+
+Nothing is reimplemented, and nothing the model says reaches a layer unclamped: every settings
+type in this app already has a `normalized` that pins its values to a range, so a model asking
+for saturation 400 gets 3.
+
+## Full resolution, and where it stops being a choice
+
+The working default was "the model sees full resolution", taken from `removeBackground`. For
+everything this branch ships that is simply true and free: the planner emits numbers, not
+pixels, so the operations run on the layer's own raster at whatever size it is. There is no
+resampling and no quality loss anywhere in the path.
+
+It stops being free the moment a *generative* model is involved, and the useful way to say why
+is **input, not output**. Every reference pipeline pins the *conditioning* image — the copy of
+your layer the model actually looks at. FLUX.1 Kontext resizes it to the nearest of 17 preferred
+resolutions, all about 1.05 MP. Qwen-Image-Edit resizes it for a target area of 1024×1024.
+FLUX.2 is more generous — Black Forest Labs' own code caps a single reference at 2024², about
+4.1 MP, and their blog claims "image editing at up to 4 megapixels" — but it is still a cap.
+Output size is a separate question and sometimes separately controllable, which is exactly the
+trap: a model can hand back 6000×4000 pixels having only ever *seen* one or four megapixels of
+your layer.
+
+So the number that matters is not what comes back, it is what went in. Take the returned picture
+and let `AssistantPixels.normalized` (`Compositor/Document/AssistantBackend.swift:122`) resample
+it onto the layer, and you get an upscale — 4.8× linear against Kontext, about 2.4× against
+FLUX.2 — of detail the model never had. In a compositor that is the first thing a user notices,
+and it is not recoverable afterwards.
+
+The way out is not a better upscaler. It is noticing that **resampling the model's picture is
+only one of three ways to use a model, and it is the worst one.** The edits people ask for split
+into three classes, and each gets its own policy:
+
+**Class 1 — the edit is a colour transfer.** Grading, white balance, exposure, film looks, broad
+relighting. You never need the model's pixels. Show it what it was going to see anyway, take the
+before/after pair it returns, *fit a transform* from that pair, and evaluate the transform on the
+full-resolution original. This app already has the delivery vehicle: `CIColorCube` at 33 points per
+axis, which is exactly what `HueSaturationFilter` does today
+(`Compositor/Document/HueSaturation.swift:234`, `:241`). Bilateral Guided Upsampling is the
+published version of the idea.
+
+Two qualifications, because an earlier draft of this page called this "lossless" and it is not.
+BGU is a *fast approximation*, and its own paper holds it only where the operator "can be
+modeled as a local curve" — a generative colour grade may or may not be. And a 33³ global RGB
+cube is strictly weaker than what BGU fits, which is a grid of spatially varying local affine
+transforms; a cube cannot express "warmer in the shadows only". BGU's quoted 13 ms is its own
+grid slicing on a 2016 desktop CPU, not `CIColorCube` on Apple silicon, which nobody has
+measured here. What survives is the shape, and it is the part worth having: the full-resolution
+pixels come out of a full-resolution operator rather than out of an upscale.
+
+**Class 2 — the edit is a region.** Remove the background, brighten the subject, any local
+adjustment. Take the model's *mask*, not its pixels, refine it against the full-resolution
+layer, and run Compositor's own full-resolution operation through it. The arithmetic for that
+is already here — `GuidedMatte.filter(mask:guide:width:height:radius:epsilon:)`
+(`Compositor/Document/GuidedMatte.swift:45`) is a complete O(1) guided filter over `[Float]`
+that takes a mask and a guide at whatever size you hand it, so you draw the model's small mask
+up to the layer's size and run the filter there, with the full-resolution layer as the guide.
+`SubjectRemoval`'s committed path already does exactly that: `SubjectRemoval.swift:88` passes
+`limit: .greatestFiniteMagnitude`, so no reduction happens and the guided filter runs at full
+resolution. Then blend through it with `PixelAdjust.blend`.
+
+**Do not reach for `GuidedMatte.refine` for this**, which an earlier draft of this page
+recommended and was wrong about. `refine` (`GuidedMatte.swift:100`) downsamples the *guide*
+along with the mask (`:106`) and then scales the small result back up with a plain Core Graphics
+draw at `.high` (`:113–114`). The full-resolution guide never touches the output, so it is a
+bicubic upscale of a low-resolution matte, not a guided upsample against the real image. That is
+the right trade for what it was written for — the interactive preview at
+`SubjectRemoval.swift:104`, which passes `limit: 1400` so a slider stays responsive — and the
+wrong one for a mask that has to survive at full size.
+
+One note on Core Image's own joint upsample, since it is the obvious alternative.
+`GuidedMatte.swift:3–5` says `CIGuidedFilter` "does nothing on this system and its
+edge-preserving upsample barely moves the mask", but that sentence covers two different filters:
+`CIGuidedFilter` is not a documented public Core Image filter at all, so that half is
+unsurprising, and `CIEdgePreserveUpsampleFilter` *is* documented and *is* used in this app at
+`ObjectSelection.swift:68`. The comment is one developer's observation and was never
+independently checked. What the code shows is the better argument: `ObjectSelection` reaches for
+the Core Image filter defensively (`if let filter … else { refined = coarse }`) and then
+thresholds the output to pure black and white at `:80`, so nothing subtle survives the trip
+there either way. A soft matte at full size is a different job, and `GuidedMatte` is what this
+app uses for it.
+
+**Class 3 — the edit invents content.** Inpainting, object removal, adding or replacing things,
+restyling. Here there is no lossless path and no amount of cleverness makes one. The honest
+answer is to crop a native-sized window *at full resolution* around the region so the model sees
+real pixels, edit that, and composite it back through
+`PixelAdjust.blend(_:over:through:pixelToDocument:isMask:)`
+(`Compositor/Document/PixelAdjust.swift:38`), which blends in float with no colour conversion so
+fully-selected pixels stay exact. Where the region is genuinely bigger than the model's native
+size, say so in the UI rather than silently upscaling.
+
+**Tiling does not rescue class 3**, which is worth stating because it is the obvious idea. Tiled
+diffusion was built to make large *generations* fit in small VRAM: every tile gets the same
+prompt (ControlNet Tile exists because that fails), and a tile holding half a lamppost has no
+idea what the other half looked like. It also does not lower the per-tile memory peak, so it
+buys nothing on the machine that needed help. A 24 MP layer at 1248×832 is 25 tiles
+edge-to-edge and 25–49 with overlap depending on how much you use, each one a full model run.
+Every per-tile timing I could find is single-source and states no resolution, so the total is
+not worth quoting to a decimal — but at any plausible per-tile cost this is tens of minutes to
+hours for one edit behind a text field, which is not a product.
+
+None of this needs the boundary to change shape, which is the point worth keeping.
+`AssistantResult` is `.pixels(CGImage)` and nothing in the protocol says those pixels came out of
+a model: a backend can reduce the layer, run the model on the reduction, fit a cube, apply it to
+the full-resolution `request.image`, and return a full-size `CGImage` — at which point
+`normalized` takes its same-size branch at `AssistantBackend.swift:129–130` and copies with
+`.none` interpolation. No resampling of the result at all, entirely inside the backend.
+
+`DownsampleCache` (`Compositor/Rendering/DownsampleCache.swift:13`) gets you most of the way
+down with good quality, but it is not a general resampler and should not be mistaken for one:
+it produces exact power-of-two Lanczos halvings only, capped at six, and each halving rounds up,
+so "the copy reaches up to 2^level − 1 source pixels past the right and bottom" (`:42–43`). It
+cannot hand a model an exact 1248×832. Use it for the bulk reduction and finish with one Core
+Graphics resample — which is cheap and harmless on the way *in*, since that copy is the model's
+to look at, not the user's to keep.
+
+One seam limit does get in the way, and it is class 2's: a backend cannot return a *mask* for a
+pixel target. `EditorSession+Assistant.swift:143` refuses that with
+`AssistantError.wrongOutput`, deliberately, because writing pixels onto a mask target destroys a
+layer silently. So "here is a region I found; now run your own full-resolution blur through it"
+is unexpressible today. A backend can work around it by applying the operation itself and
+returning `.pixels`, at the cost of owning the operation instead of reusing `PixelFilter`. If
+the generative half gets built, this is the one change to the boundary worth making.
+
+*Single-source and unmeasured, like everything else here:* the resolution behaviour is read from
+the models' own reference code, and the timings come from one report each — a 16 GB M2 mini at
+about 760 s for FLUX.1-dev at 1024² (swapping 4.6 GB), an M1 Max Studio at about 80 s for
+Qwen-Image-Edit-2511 at four steps. There is one credible counter-claim I could not confirm: a
+ComfyUI issue reports Qwen-Image holding up between 1.5 and 17 MP, with quality *improving* as
+resolution rises. If that is true the arithmetic changes materially, and it is the cheapest
+single experiment to run on a real Mac before building anything.
+
+## Limits of the seam itself
+
+Worth knowing before anyone plans around it, and true no matter what model goes behind it:
+
+- **A backend can only replace a layer's pixels in place.** `AssistantPixels.normalized`
+  resamples the result to exactly the source's width and height, so the assistant cannot change
+  a layer's size or transform. No crop, no resize, no outpainting, and no blur that spreads past
+  the layer's edge the way the Filter menu's own padded path allows.
+- **Content-Aware Fill needs a selection**, so "remove that lamppost" only works if the user
+  selected it first. The assistant cannot make the selection itself — it never sees the image.
+- **Blurring one part of a picture is not reachable.** "Blur the background" blurs the layer.
+  Region-aware editing needs the planner to be able to ask for a mask, which is the natural next
+  step and is not in this branch. Note that even with it, the region has to be one Vision can
+  find: the subject, or the foreground. There is no "the sky" and no "the red car" on macOS 26.
+
+## If you want generative editing
+
+It has to be a model we ship and run ourselves. It is buildable on a Mac today by one engineer,
+but not where you would look first.
+
+**MLX Swift is not the answer, which was a surprise.** `mlx-swift-examples` ships exactly two
+libraries, MLXMNIST and StableDiffusion, and the StableDiffusion one has had no substantive
+commit since June 2025. The only model in it that does image-to-image is SDXL-Turbo, whose
+weights are non-commercial. And SDXL img2img is **not instruction editing** anyway: it
+VAE-encodes the image, renoises it, and denoises against a prompt describing the *target
+picture*. "Make the sky stormier" is read as a caption, not as a command — which is exactly the
+distinction that matters for an assistant. There is no FLUX.1 Kontext, Qwen-Image-Edit,
+Step1X-Edit or OmniGen in `mlx-swift-examples`, and none in ml-explore's *Python* `mlx-examples`
+either.
+
+Swift ports of the real edit models do exist outside ml-explore, and the licence is what rules
+them out rather than the maturity. [`mzbac/flux.swift`](https://github.com/mzbac/flux.swift) is
+mlx-swift-based, has 123 stars, and genuinely runs **FLUX.1-Kontext-dev**, image-to-image — it
+is the one thing found anywhere that follows an edit instruction in Swift on a Mac today. It is
+**GPLv3** (read from its `LICENSE` file, not from a badge), which for an MIT app distributed on
+the Mac App Store is the end of the conversation, and Kontext's weights are non-commercial on
+top of that. The same author's
+[`flux2.swift`](https://github.com/mzbac/flux2.swift) is **Apache-2.0** and does FLUX.2 klein
+image-to-image, which clears the licence on both code and weights — but it has 7 stars, and
+that is the whole of the usable Swift ecosystem. For contrast,
+[`liuliu/swift-diffusion`](https://github.com/liuliu/swift-diffusion) is BSD-3-Clause and well
+maintained, but it is Stable Diffusion v1.4 on the author's own s4nnc framework: no Kontext, no
+instruction editing.
+
+**Core ML is not the answer either**, which is the other place you would look. Apple's
+`ml-stable-diffusion` Swift package does implement image-to-image — shipping Mac apps prove it
+— but img2img is the "rewrites everything against a caption" behaviour, not instruction
+following. Converted InstructPix2Pix weights exist, yet the Swift pipeline cannot drive them:
+it builds the 8-channel latent from pure noise instead of concatenating the image latent, and
+does two-way classifier-free guidance where InstructPix2Pix needs three. Making it work means
+forking and reimplementing the denoising loop, against a repository whose newest dependency pin
+is from September 2024 and whose SD3 path depends on a project archived in March 2026.
+
+**The runtime that actually does this today is C++.** `stable-diffusion.cpp` is MIT, has a Metal
+backend, is actively developed, and supports FLUX.1-Kontext, the Qwen-Image-Edit series and
+FLUX.2 klein — models that genuinely follow an edit instruction. Decisively for this boundary,
+it exposes `sd_cancel_generation()`, so the cancellation `AssistantBackend.run` promises is real
+rather than aspirational. There is no SwiftPM package; you build an xcframework and add a C
+interop target, the way whisper.cpp is usually consumed.
+
+Two things to decide with it, in this order:
+
+- **Licence, before anything else.** FLUX.2-klein and Qwen-Image-Edit are Apache-2.0. FLUX.1
+  Kontext is not — it is the best-known of the three and the one you cannot ship commercially.
+- **Size.** GGUF through `stable-diffusion.cpp` is far kinder than MLX snapshots: the project
+  claims Kontext runs in 4–6 GB, against roughly 16 GB for a FLUX.2-klein bf16 MLX snapshot and
+  about 60 GB for Qwen-Image-Edit-2511 in MLX, which rules that one out. Either way the weights
+  are a multi-gigabyte download that cannot live in the app bundle, so they go in the app's own
+  container — which, per the table above, needs no entitlement.
+
+**Memory is the constraint to watch, and the floor is genuinely unsettled.** It is unified
+memory, so the weights compete with the open document. The most encouraging number is Black
+Forest Labs' own: FLUX.2 [klein] 4B is Apache-2.0, does single- and multi-reference *editing*,
+and BFL's README says it "fits in ~8GB VRAM (RTX 3090/4070 and up)". If that transferred, a
+16 GB Mac would be in range and the whole hardware question would look different.
+
+Two reasons not to bank on it yet. "VRAM" and "offload to RAM" are discrete-GPU framing: on
+Apple silicon there is one pool, shared with the document and with `DownsampleCache`'s own
+100 MP of halvings, and no published Apple-silicon measurement of any of these models under
+`stable-diffusion.cpp` could be found. And the low figures that circulate for klein — around
+5 GB resident, 10 GB peak at 768² — are text-to-image runs; the figures explicitly tagged as
+*edit* runs for the same package are peaks around 20 GB. Editing carries reference images the
+text-to-image path does not.
+
+So the honest state of it: the floor might be 8 GB and might be 20, and the difference decides
+whether this runs on a normal Mac. **One measurement settles it** — `flux2-klein-4b-edit` at
+768² on a 16 GB machine, footprint recorded. Nobody has published it, and it cannot be taken
+from here. Treat every other number in this section the same way: single-source and unmeasured.
+
+**What could not be checked from here, in the order it would change a decision.** (1) The
+memory floor for an *edit* run of FLUX.2 [klein] 4B on a 16 GB Mac — the single measurement that
+decides whether the local route is viable at all. (2) Whether `stable-diffusion.cpp` on Metal
+performs anywhere near its discrete-GPU claims; no Apple-silicon benchmark for these models
+exists that I could find. (3) How well a colour cube fitted from a reduced before/after pair
+reproduces the model's intent at full size. (4) Whether `sd_cancel_generation()` aborts promptly
+enough to honour a `Task` cancel. All four need a real Mac. One thing that is *reported* and
+worth knowing while judging feasibility: Draw Things ships FLUX.1-Kontext editing on macOS and
+iPadOS, so on-device instruction editing is not hypothetical — I could not verify its resolution
+ceiling, which is the part that matters for a compositor.
+
+The shape it would take is a second planner operation — one that says "hand the whole layer to
+the generative backend with this prompt" — plus a `GenerativeBackend` behind it. The
+`AssistantBackend` protocol does not need to change to accommodate it, which was the point of
+keeping it neutral.
+
+### What `onda-ai` already solves, and what it decides
+
+`santeezi0325/onda-ai` is a model-agnostic capability gateway. It is **TypeScript** — zero
+runtime dependencies, plain `fetch` — so it cannot be linked into a Swift app. Compositor would
+reach it over HTTP, which is the local-server row of the table above: no entitlement change.
+
+It already has the capability we need. `AIGateway.editImage(ctx, { prompt, image, seed, signal })`
+takes a base64 `ImagePart` and returns image URLs or data URIs
+(`packages/ai/src/gateway.ts:373`). It takes an `AbortSignal`, so the cancellation this boundary
+promises maps straight through rather than being bolted on.
+
+Its registry picked `qwen-image-edit-2511` — Apache-2.0, 20B, instruction-based editing of a
+supplied photo, described there as "the genuinely self-hostable answer"
+(`packages/ai/src/registry/catalog.ts:376`). That is worth noting because the survey above
+arrived at the same model independently, from the opposite direction: Qwen-Image-Edit is one of
+the two Apache-2.0 families `stable-diffusion.cpp` supports. Same weights, two different places
+to run them.
+
+So the decision is not *which model*. It is **whose hardware**, and `onda-ai` is explicit that
+this is a boundary question rather than a performance one: every deployment declares itself
+`private` (our GPU), `processor` (a third party running open weights) or `vendor` (a proprietary
+API), and the router fails rather than exceeding what a request allows.
+
+| | Through `onda-ai` | On the user's Mac |
+|---|---|---|
+| How | HTTP to the gateway | `stable-diffusion.cpp` xcframework, GGUF weights |
+| Already built | the gateway, the registry, licence diligence, fallbacks, metering | nothing |
+| Still to build | the OpenAI-shaped image endpoint, which the catalog notes does not exist yet | C interop, weight download, the whole path |
+| Where the photo goes | off the Mac, to `private` or `processor` hardware | nowhere |
+| Hardware | 24 GB VRAM minimum quantized, 48 GB comfortable | a 24 GB-class Mac at best; not a 16 GB one |
+| Credentials | none for the self-hosted deployment (`keyOptional: true`); a token for Replicate | none |
+
+The honest reading: **`qwen-image-edit-2511` will not run on most users' Macs.** `onda-ai`'s own
+deployment notes put a 16 GB Mac at roughly 10–11 GB of GPU working set, against a 24 GB
+floor for this model quantized. So "inference on device" and "generative editing" are, for now,
+close to mutually exclusive on the hardware a Compositor user actually has — which is the real
+finding, and the thing to decide before any of this gets built.
+
+The two are not exclusive as *code*, though. Both sit behind `AssistantBackend` and can coexist:
+full-resolution adjustments locally with no network at all, and generative edits through
+whichever of the two you pick. That is what the neutral protocol bought.
+
+### What the sandbox allows, whichever model it is
+
+`Config/Compositor.entitlements` decides more about this than the model does. The app declares
+`com.apple.security.app-sandbox`, `com.apple.security.network.client`,
+`com.apple.security.files.user-selected.read-write`, and a mach-lookup exception for Sparkle's
+two helpers. Nothing else — in particular **no `network.server`**, so the app cannot listen on
+a port, and no entitlement that would let it read arbitrary places on disk.
+
+That maps onto the three shapes a model can arrive in:
+
+| Shape | Works today? | What it costs |
+|---|---|---|
+| A Swift package linked into the app | Yes | Weights live in the app's own container, which needs no entitlement; downloading them uses `network.client`. Cleanest, but we own the download UX and the disk. |
+| A helper binary we ship | Probably, with work | It has to live inside the app bundle and it inherits the sandbox; signing and notarizing a second executable is real work. The app cannot run a binary the *user* installed — that is outside what it may read and execute. |
+| A local server on `localhost` | **Yes, with no change at all** | `network.client` already covers connecting out, including to a loopback port. Costs nothing in entitlements, weights or bundle size. The price is that the app depends on something the user installed and started. |
+
+The third row is the surprising one and worth knowing before picking: if a model already runs
+as a local HTTP server, reaching it needs nothing from this app that is not already there.
+
+`network.client` would equally allow a *remote* API, but that runs into a different wall: the
+app has no secrets mechanism anywhere, so there is nowhere to put a key.
+
+Not verified here: exactly what a sandboxed app may `posix_spawn`. The entitlements above are
+read from the file; the spawn rules are from Apple's sandbox model and were not tested on a Mac.

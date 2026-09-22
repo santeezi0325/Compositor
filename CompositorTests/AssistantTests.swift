@@ -28,6 +28,24 @@ final class HangingAssistantBackend: AssistantBackend, @unchecked Sendable {
     }
 }
 
+/// Records the history each call was handed, so a test can check what the model would see.
+final class HistoryRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var calls: [[AssistantTurn]] = []
+    func record(_ history: [AssistantTurn]) { lock.lock(); calls.append(history); lock.unlock() }
+    var seen: [[AssistantTurn]] { lock.lock(); defer { lock.unlock() }; return calls }
+}
+
+/// Answers without touching pixels, and remembers the conversation it was given.
+struct HistoryRecordingBackend: AssistantBackend, @unchecked Sendable {
+    let name = "History"
+    let recorder: HistoryRecorder
+    func run(_ request: AssistantRequest, history: [AssistantTurn]) async throws -> AssistantResult {
+        recorder.record(history)
+        return AssistantResult(output: .none, note: "Noted.")
+    }
+}
+
 /// Carries a request out of a stub closure that runs off the test's own actor.
 final class RequestRecorder: @unchecked Sendable {
     private let lock = NSLock()
@@ -51,6 +69,19 @@ nonisolated enum TestRasters {
         ctx.setFillColor(CGColor(srgbRed: gray, green: gray, blue: gray, alpha: 1))
         ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
         guard let image = ctx.makeImage() else { throw ExportError.render }
+        return image
+    }
+
+    /// A left-to-right black-to-white ramp: a histogram that already spans the full range, so
+    /// an automatic levels pass has nothing to correct.
+    static func ramp(width: Int, height: Int) throws -> CGImage {
+        let context = try BrushRaster.context(width: width, height: height, mask: false)
+        for x in 0..<width {
+            let level = CGFloat(x) / CGFloat(max(1, width - 1))
+            context.setFillColor(red: level, green: level, blue: level, alpha: 1)
+            context.fill(CGRect(x: x, y: 0, width: 1, height: height))
+        }
+        guard let image = context.makeImage() else { throw ExportError.render }
         return image
     }
 
@@ -284,10 +315,13 @@ nonisolated enum TestRasters {
         #expect(s.canRunAssistant == false)
     }
 
-    // MARK: The placeholder backend
+    // MARK: The shipping backend
 
-    @Test func thePlaceholderEditsWhatItUnderstands() async throws {
+    @Test func theAssistantEditsWhatItUnderstands() async throws {
         let s = try fixture()
+        // Pinned to the phrase table: on a Mac where Apple Intelligence is on, the standard
+        // backend would plan with the model instead and this would not be a fixed assertion.
+        s.assistantBackend = PlanningAssistantBackend(planners: [KeywordAssistantPlanner()])
         let original = try #require(s.activeLayer?.asset?.image)
         let conversation = try await send(s, "make it black and white")
         #expect(conversation.error == nil)
@@ -298,11 +332,30 @@ nonisolated enum TestRasters {
         #expect(abs(r - b) <= 2, "Desaturated, so the channels agree")
     }
 
-    @Test func thePlaceholderSaysSoRatherThanGuessing() async throws {
+    @Test func theBackendIsHandedTheConversationBeforeThisInstruction() async throws {
+        // `submitAssistant` appends the new instruction to `turns` first, so the panel can show
+        // it while the model works. Passing `turns` straight through sent it again as the last
+        // line of the history, and a model reading the same sentence twice in a row answers the
+        // conversation it appears to be in — which is how a follow-up got a reply identical to
+        // the one it was complaining about.
         let s = try fixture()
+        let recorder = HistoryRecorder()
+        s.assistantBackend = HistoryRecordingBackend(recorder: recorder)
+        _ = try await send(s, "warmer")
+        _ = try await send(s, "now cooler")
+        #expect(recorder.seen.count == 2)
+        #expect(recorder.seen.first?.isEmpty == true, "Nothing was said before the first instruction")
+        let second = try #require(recorder.seen.last)
+        #expect(second.map(\.text) == ["warmer", "Noted."])
+        #expect(second.last?.text != "now cooler", "The instruction is sent on its own, not also as history")
+    }
+
+    @Test func theAssistantSaysSoRatherThanGuessing() async throws {
+        let s = try fixture()
+        s.assistantBackend = PlanningAssistantBackend(planners: [KeywordAssistantPlanner()])
         let original = try #require(s.activeLayer?.asset?.image)
         let conversation = try await send(s, "put a hat on the cat")
         #expect(s.activeLayer?.asset?.image === original)
-        #expect(conversation.error?.contains("does not know how to") == true)
+        #expect(conversation.error?.contains("did not follow") == true)
     }
 }
