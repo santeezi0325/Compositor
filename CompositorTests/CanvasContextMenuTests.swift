@@ -92,6 +92,36 @@ struct CanvasContextMenuTests {
                 "Control-click opened the menu and would swallow the free drag")
     }
 
+    /// `canEditLayers` already contains `textDraft == nil`, so with the inline editor up every gated
+    /// item is gray and the menu is Fit Canvas and Actual Pixels — offered over a text field, where the
+    /// useful menu is the text view's own. Refusing hands the click back so that one can appear.
+    @Test func noMenuWhileTextIsBeingEdited() throws {
+        let session = EditorSession()
+        session.createDocument(width: 800, height: 600, emptyLayer: true)
+        session.selectTool(.type)
+        #expect(CanvasContextMenu.isAvailable(session, spaceHeld: false))
+        session.beginText(at: CGPoint(x: 30, y: 40))
+        #expect(session.textDraft != nil, "the draft never opened, so this proves nothing")
+        #expect(!CanvasContextMenu.isAvailable(session, spaceHeld: false),
+                "a menu of gray items offered over the text being edited")
+    }
+
+    /// Transform names what it will act on, the way the Layer menu does: Cmd-T takes the selected
+    /// pixels when there is a selection and the layer when there is not.
+    @Test func transformNamesItsTargetAndTakesBothGuards() throws {
+        let session = try sessionWithPixels()
+        session.selectTool(.marquee)
+        #expect(session.selection == nil)
+        let layer = try item("Transform Layer", session)
+        #expect(layer.isEnabled == (session.canTransform || session.canTransformSelection))
+        #expect(session.canTransform, "a pixel layer should be transformable")
+
+        session.selectAll()
+        #expect(session.canTransformSelection)
+        _ = try item("Transform Selection", session)
+        #expect(items(session).allSatisfy { $0.title != "Transform Layer" }, "both titles at once")
+    }
+
     /// The titles are not written out twice: the built menu is checked against the items it came from,
     /// so an item added later cannot quietly fail to reach the menu.
     @Test func theBuiltMenuMatchesTheItemsAndSeparatesTheGroups() throws {

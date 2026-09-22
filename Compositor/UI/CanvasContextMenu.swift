@@ -25,8 +25,13 @@ enum CanvasContextMenu {
     /// to show a list would be a straight loss for the tool it matters most to. A click mid-stroke or
     /// while Space is panning is not a menu either: the guard mirrors the one in `rightMouseDown` so
     /// the two cannot disagree about who the click belongs to.
+    ///
+    /// Text being edited is refused for a different reason. `canEditLayers` already contains
+    /// `textDraft == nil`, so with the inline editor up every gated item below is gray and the menu
+    /// is nothing but Fit Canvas and Actual Pixels. The canvas gives up first responder for the same
+    /// reason while a draft is open (see `synchronizeDisplay`), so the click belongs to the text.
     static func isAvailable(_ session: EditorSession, spaceHeld: Bool) -> Bool {
-        session.document != nil && !session.tool.isBrushTool
+        session.document != nil && !session.tool.isBrushTool && session.textDraft == nil
             && session.brushStroke == nil && session.warpStroke == nil && !spaceHeld
     }
 
@@ -51,7 +56,15 @@ enum CanvasContextMenu {
                 if let id = session.activeLayerID { session.loadLayerSelection(layerID: id) }
             }
         ]
+        // Transform leads this group because it is the most canvas-centric command the app has: the
+        // handles it puts up are on the image itself. It names what it will act on the way the Layer
+        // menu does, and takes both guards, since Cmd-T transforms the selected pixels when there is
+        // a selection and the layer when there is not.
         let pixels = [
+            Item(title: session.canTransformSelection ? "Transform Selection" : "Transform Layer",
+                 isEnabled: session.canTransform || session.canTransformSelection) {
+                session.transformCommand()
+            },
             Item(title: "Fill with Foreground Color", isEnabled: session.canEditPixels) {
                 Task { await session.fillSelection(with: .foreground) }
             },
