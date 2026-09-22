@@ -23,10 +23,17 @@ struct CanvasContextMenuTests {
     private func item(_ title: String, _ session: EditorSession) throws -> CanvasContextMenu.Item {
         try #require(items(session).first { $0.title == title }, "no item titled \(title)")
     }
-    private func rightClick(in window: NSWindow) -> NSEvent {
-        NSEvent.mouseEvent(with: .rightMouseDown, location: NSPoint(x: 20, y: 10), modifierFlags: [],
+    private func rightClick(in window: NSWindow, flags: NSEvent.ModifierFlags = []) -> NSEvent {
+        NSEvent.mouseEvent(with: .rightMouseDown, location: NSPoint(x: 20, y: 10), modifierFlags: flags,
                            timestamp: 0, windowNumber: window.windowNumber, context: nil,
                            eventNumber: 0, clickCount: 1, pressure: 0)!
+    }
+    private func canvas(_ session: EditorSession) -> (CanvasView, NSWindow) {
+        let view = CanvasView(session: session)
+        let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 40, height: 20), styleMask: [.titled],
+                              backing: .buffered, defer: false)
+        window.contentView = view
+        return (view, window)
     }
 
     /// The whole reason the brush tools are excluded: a right-drag there sets size and hardness, and a
@@ -59,10 +66,7 @@ struct CanvasContextMenuTests {
     /// The view has to agree with `isAvailable`, since the view is the half the user actually meets.
     @Test func theCanvasViewReturnsTheMenuOnlyWhenItShould() throws {
         let session = try sessionWithPixels()
-        let view = CanvasView(session: session)
-        let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 40, height: 20), styleMask: [.titled],
-                              backing: .buffered, defer: false)
-        window.contentView = view
+        let (view, window) = canvas(session)
         let event = rightClick(in: window)
 
         session.selectTool(.brush)
@@ -74,6 +78,18 @@ struct CanvasContextMenuTests {
         // Left on, AppKit would validate each item against the responder chain, which answers yes to
         // the shared selector, and every item would come up enabled whatever the session says.
         #expect(!menu.autoenablesItems)
+    }
+
+    /// Control-click is AppKit's other route to a context menu, and on this canvas Control already means
+    /// "drag without snapping" (EditorCanvas: "Control drags freely", which TransformPressTests relies on).
+    /// The menu has to stay off that gesture or the press that starts such a drag never arrives.
+    @Test func controlClickIsLeftToTheFreeDrag() throws {
+        let session = try sessionWithPixels()
+        session.selectTool(.move)
+        let (view, window) = canvas(session)
+        #expect(view.menu(for: rightClick(in: window)) != nil, "an ordinary right-click got no menu")
+        #expect(view.menu(for: rightClick(in: window, flags: .control)) == nil,
+                "Control-click opened the menu and would swallow the free drag")
     }
 
     /// The titles are not written out twice: the built menu is checked against the items it came from,
