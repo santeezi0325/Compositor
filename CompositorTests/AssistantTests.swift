@@ -28,6 +28,24 @@ final class HangingAssistantBackend: AssistantBackend, @unchecked Sendable {
     }
 }
 
+/// Records the history each call was handed, so a test can check what the model would see.
+final class HistoryRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var calls: [[AssistantTurn]] = []
+    func record(_ history: [AssistantTurn]) { lock.lock(); calls.append(history); lock.unlock() }
+    var seen: [[AssistantTurn]] { lock.lock(); defer { lock.unlock() }; return calls }
+}
+
+/// Answers without touching pixels, and remembers the conversation it was given.
+struct HistoryRecordingBackend: AssistantBackend, @unchecked Sendable {
+    let name = "History"
+    let recorder: HistoryRecorder
+    func run(_ request: AssistantRequest, history: [AssistantTurn]) async throws -> AssistantResult {
+        recorder.record(history)
+        return AssistantResult(output: .none, note: "Noted.")
+    }
+}
+
 /// Carries a request out of a stub closure that runs off the test's own actor.
 final class RequestRecorder: @unchecked Sendable {
     private let lock = NSLock()
@@ -299,6 +317,24 @@ nonisolated enum TestRasters {
         let r = Int(read.data[4 * read.rowBytes + 4 * 4])
         let b = Int(read.data[4 * read.rowBytes + 4 * 4 + 2])
         #expect(abs(r - b) <= 2, "Desaturated, so the channels agree")
+    }
+
+    @Test func theBackendIsHandedTheConversationBeforeThisInstruction() async throws {
+        // `submitAssistant` appends the new instruction to `turns` first, so the panel can show
+        // it while the model works. Passing `turns` straight through sent it again as the last
+        // line of the history, and a model reading the same sentence twice in a row answers the
+        // conversation it appears to be in — which is how a follow-up got a reply identical to
+        // the one it was complaining about.
+        let s = try fixture()
+        let recorder = HistoryRecorder()
+        s.assistantBackend = HistoryRecordingBackend(recorder: recorder)
+        _ = try await send(s, "warmer")
+        _ = try await send(s, "now cooler")
+        #expect(recorder.seen.count == 2)
+        #expect(recorder.seen.first?.isEmpty == true, "Nothing was said before the first instruction")
+        let second = try #require(recorder.seen.last)
+        #expect(second.map(\.text) == ["warmer", "Noted."])
+        #expect(second.last?.text != "now cooler", "The instruction is sent on its own, not also as history")
     }
 
     @Test func theAssistantSaysSoRatherThanGuessing() async throws {

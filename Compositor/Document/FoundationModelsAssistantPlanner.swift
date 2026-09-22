@@ -75,15 +75,19 @@ nonisolated struct FoundationModelsAssistantPlanner: AssistantPlanner {
         Prefer one step. Use two or three only when the user genuinely asked for separate \
         changes. Never use more than three.
 
-        If the instruction asks for something in this list, plan it. If it asks for anything \
-        else — adding or removing objects, changing what the picture is of, generating new \
-        image content, cropping, resizing, or anything you cannot express with these \
-        operations — return no steps at all and say in the note, in one sentence, that this \
-        assistant only adjusts the pixels that are already there. Never substitute an operation \
-        you can do for one you cannot.
+        You cannot crop, resize, straighten, move or rotate anything, add or remove objects, \
+        change what the picture is of, or generate new image content. You only adjust the \
+        pixels that are already there, and the picture always comes back the same size.
+
+        Most requests ask for more than one thing, and some of those things will be off that \
+        list. Do the parts you can and put every part you cannot into `skipped`. NEVER quietly \
+        do the part you can and report success — a user who asked for a crop and a colour fix \
+        must be told the crop did not happen. Never substitute an operation you can do for one \
+        you cannot. If you can do none of it, return no steps and say why in `skipped`.
 
         The note is one short sentence in the past tense, in plain English, that the user will \
-        read in a chat panel. No lists, no markup, no emoji.
+        read in a chat panel, and it describes ONLY what you actually did. No lists, no markup, \
+        no emoji. If you did nothing, leave it empty and fill in `skipped`.
         """
         let vocabulary = target.isMask ? """
 
@@ -119,12 +123,15 @@ nonisolated struct ModelPlan {
     var note: String
     @Guide(description: "The edits to apply in order. At most three. Empty if you cannot do what was asked.")
     var steps: [ModelStep]
+    @Guide(description: "One sentence naming any part of the request you could NOT do, and why, for the user to read. Example: \"I cannot crop, so the framing is unchanged.\" Empty only if you did everything asked.")
+    var skipped: String
 
     /// Spelled out rather than left to the memberwise initializer, which a macro that adds its
     /// own initializer would suppress. The tests build these directly.
-    init(note: String, steps: [ModelStep]) {
+    init(note: String, steps: [ModelStep], skipped: String = "") {
         self.note = note
         self.steps = steps
+        self.skipped = skipped
     }
 }
 
@@ -176,16 +183,39 @@ extension ModelPlan {
     /// target is dropped rather than translated, because translating it would be guessing at an
     /// intent; if that empties the plan, the instruction is refused outright.
     func resolved(for target: AssistantTarget, instruction: String) throws -> AssistantPlan {
-        let resolved = steps.prefix(AssistantPlan.stepLimit).compactMap { $0.resolved(for: target) }
+        let considered = Array(steps.prefix(AssistantPlan.stepLimit))
+        let resolved = considered.compactMap { $0.resolved(for: target) }
+        let done = self.note.trimmingCharacters(in: .whitespacesAndNewlines)
+        let couldNot = skipped.trimmingCharacters(in: .whitespacesAndNewlines)
+        // A step the model named that cannot reach what is selected — a mask operation aimed at
+        // a layer's pixels, say. Dropping it is right; dropping it silently is not, because the
+        // user asked for it and would otherwise read the note as having got it.
+        let unreachable = considered.count - resolved.count
+
         guard !resolved.isEmpty else {
-            // No steps is a real answer when the model said why — that is how it declines an
-            // instruction this assistant cannot carry out. A blank note is a failure.
-            let note = self.note.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !note.isEmpty else { throw AssistantError.notUnderstood(instruction) }
-            return AssistantPlan.answer(note)
+            // No steps is a real answer when the model said why: that is how it declines. The
+            // reason lives in `skipped` now, and the note is the fallback for a model that put
+            // it there instead. Neither means it produced nothing, which the user has to hear.
+            let reason = couldNot.isEmpty ? done : couldNot
+            guard !reason.isEmpty else { throw AssistantError.notUnderstood(instruction) }
+            return AssistantPlan.answer(reason)
         }
-        let note = self.note.trimmingCharacters(in: .whitespacesAndNewlines)
-        return AssistantPlan(steps: resolved, note: note.isEmpty ? "Done." : note)
+        return AssistantPlan(steps: resolved,
+                             note: Self.sentences(done: done, couldNot: couldNot, unreachable: unreachable))
+    }
+
+    /// What the user reads: what ran, then anything that did not, in that order. The second half
+    /// is the point — an instruction that asks for a crop and a colour fix gets the colour fix,
+    /// and saying only that reads as having done both.
+    static func sentences(done: String, couldNot: String, unreachable: Int) -> String {
+        var parts = [done.isEmpty ? "Done." : done]
+        if !couldNot.isEmpty { parts.append(couldNot) }
+        if unreachable > 0 {
+            parts.append(unreachable == 1
+                ? "I left out one step that does not apply to what is selected."
+                : "I left out \(unreachable) steps that do not apply to what is selected.")
+        }
+        return parts.joined(separator: " ")
     }
 }
 

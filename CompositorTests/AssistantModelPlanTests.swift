@@ -57,6 +57,51 @@ struct AssistantModelPlanTests {
         #expect(broken.normalized.contrast == 1, "Not a number falls back to neutral")
     }
 
+    @Test func whatItCouldNotDoIsSaidRatherThanLeftOut() throws {
+        // The failure J hit on the first real run: "fix the cropping and lighting" adjusted the
+        // lighting, could not crop, and said only the first half — which reads as having done
+        // both. What ran and what did not both have to reach the note.
+        let plan = try ModelPlan(note: "I adjusted the brightness and contrast.",
+                                 steps: [ModelStep(operation: .brightness, amount: 0.4)],
+                                 skipped: "I cannot crop, so the framing is unchanged.")
+            .resolved(for: .layer, instruction: "fix the cropping and lighting for a headshot")
+        #expect(plan.steps.count == 1)
+        #expect(plan.note.hasPrefix("I adjusted"), "What it did comes first")
+        #expect(plan.note.contains("cannot crop"), "What it could not do is not dropped")
+    }
+
+    @Test func aStepThatCannotReachTheTargetIsReportedNotOnlyDropped() throws {
+        // Dropping it is right. Dropping it in silence is the same failure in a different place:
+        // the user asked for it and the note would otherwise read as though they got it.
+        let plan = try ModelPlan(note: "Feathered the mask.",
+                                 steps: [ModelStep(operation: .maskFeather, amount: 0.5),
+                                         ModelStep(operation: .brightness, amount: 0.4)])
+            .resolved(for: .mask, instruction: "feather it and brighten it")
+        #expect(plan.steps.count == 1)
+        #expect(plan.note.contains("left out one step"))
+    }
+
+    @Test func decliningEverythingUsesTheReasonItGave() throws {
+        let plan = try ModelPlan(note: "", steps: [],
+                                 skipped: "I cannot add things to a picture, only adjust it.")
+            .resolved(for: .layer, instruction: "put a hat on the cat")
+        #expect(plan.steps.isEmpty)
+        #expect(plan.note == "I cannot add things to a picture, only adjust it.")
+    }
+
+    @Test func doingEverythingAskedAddsNothingToTheNote() throws {
+        let plan = try ModelPlan(note: "Warmed it up.", steps: [ModelStep(operation: .temperature, amount: 0.5)])
+            .resolved(for: .layer, instruction: "warmer")
+        #expect(plan.note == "Warmed it up.", "No apology when there is nothing to apologise for")
+    }
+
+    @Test func theInstructionsSayTheThingsItCannotDo() {
+        // Cropping was the one that got silently swallowed, so it is named outright.
+        let forLayer = FoundationModelsAssistantPlanner.instructions(for: .layer)
+        #expect(forLayer.contains("cannot crop"))
+        #expect(forLayer.contains("skipped"), "The model is told where to put what it could not do")
+    }
+
     @Test func decliningIsAnAnswerRatherThanAFailure() throws {
         // How the model refuses "add a hat": no steps, and a sentence saying why.
         let plan = try ModelPlan(note: "This assistant only adjusts the pixels already there.", steps: [])
