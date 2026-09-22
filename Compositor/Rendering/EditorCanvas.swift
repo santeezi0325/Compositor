@@ -1292,6 +1292,19 @@ final class CanvasView: NSView {
         if picks, session.transformAutoSelect || flags.contains(.command), let underPointer { return (underPointer, true) }
         return active.map { ($0.id, false) }
     }
+    /// The right button is shared. The brush tools take it for the size-and-hardness drag below, and
+    /// `rightMouseDown` hands every other case to `super`, whose default behavior is to open the menu
+    /// this returns. Deciding here as well, rather than leaving it to that one path, means no route
+    /// through AppKit can put a menu on top of a drag the brush wanted.
+    override func menu(for event: NSEvent) -> NSMenu? {
+        // AppKit offers the menu for a Control-click as well as a right-click, and on this canvas Control
+        // is already taken: it drags and crops without snapping (see the move branch of `continueDrag` and
+        // `cropSnap`). Opening a menu there would swallow the press that starts such a drag, so the menu
+        // is the right button only — the same trade the brush drag gets below.
+        guard !event.modifierFlags.contains(.control),
+              CanvasContextMenu.isAvailable(session, spaceHeld: spaceHeld) else { return nil }
+        return CanvasContextMenu.make(for: session)
+    }
     /// Right-drag with a brush tool: left and right resize the brush from its size at the press, or with Shift
     /// change its hardness. The brush circle stays where the press was.
     private var brushTipDrag: (start: CGPoint, diameter: CGFloat, hardness: CGFloat, hardnessShown: Bool)?

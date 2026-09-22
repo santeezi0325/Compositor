@@ -121,8 +121,38 @@ private struct ProjectTabButton: View {
         .background(targeted ? Color.accentColor.opacity(0.3) : Color.white.opacity(active ? 0.12 : 0.035), in: Capsule())
         .overlay(Capsule().strokeBorder(targeted ? Color.accentColor : Color.white.opacity(active ? 0.22 : 0.08), lineWidth: targeted ? 2 : 1))
         .help(targeted ? "Add to \(tab.title)" : tab.title)
+        .contextMenu {
+            Button("Save") { save(asNew: false) }.disabled(!canSave)
+            Button("Save As…") { save(asNew: true) }.disabled(!canSave)
+            Divider()
+            Button("Close Tab") { close() }.disabled(!workspace.canSwitch)
+        }
         .onDrop(of: [UTType.fileURL.identifier, UTType.image.identifier, ProjectWorkspace.layerType], delegate:
             ProjectTabDropDelegate(workspace: workspace, destination: tab.id, targeted: $targeted))
+    }
+    /// A tab can be saved when it has something to save and when it can be brought to the front first:
+    /// the save panel opens as a sheet on the window, so it has to belong to the project on screen.
+    private var canSave: Bool {
+        tab.session.document != nil && tab.controller.canStart && (active || workspace.canSwitch)
+    }
+    /// Saving a tab that isn't the visible one would put a sheet about it over a different project,
+    /// so it is selected first and only then saved.
+    private func save(asNew: Bool) {
+        Task {
+            workspace.select(tab.id)
+            tab.controller.window = workspace.window
+            await tab.controller.save(asNew: asNew)
+        }
+    }
+    /// `close` prompts about unsaved changes without bringing the tab forward first, which is bearable
+    /// from the tab's own x button and confusing from a menu: "Save changes to Untitled 2?" would open
+    /// over whatever canvas happens to be on screen. Selecting first is what `confirmQuit` does for the
+    /// same reason when it walks every tab at quit.
+    private func close() {
+        Task {
+            workspace.select(tab.id)
+            await workspace.close(tab.id)
+        }
     }
 }
 
